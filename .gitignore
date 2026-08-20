@@ -1,0 +1,32 @@
+# Environment / secrets — never commit these
+.env
+.env.*
+!.env.example
+
+# Virtual environments
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Test / lint caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Logs
+logs/
+*.log
+
+# Local SQLite case database (never commit case data)
+data/
+*.db
+
+# OS
+.DS_Store

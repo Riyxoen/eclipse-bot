@@ -1,0 +1,38 @@
+[project]
+name = "riyxoen-moderation-bot"
+version = "0.1.0"
+description = "Production-quality Discord moderation bot (Phase 1: foundation)."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "discord.py>=2.7.1,<3",
+    "python-dotenv>=1.2.0,<2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=1.0",
+    "ruff>=0.9",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["bot"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["bot/tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["bot"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]
