@@ -149,7 +149,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
     )
 
     raw_prefix = getenv(ENV_COMMAND_PREFIX)
-    command_prefix = "."
+    command_prefix = "·"
     if raw_prefix is not None and raw_prefix.strip():
         command_prefix = raw_prefix.strip()
         if len(command_prefix) > 4 or command_prefix.isspace():

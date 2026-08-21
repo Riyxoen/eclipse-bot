@@ -1010,3 +1010,237 @@ async def test_help_uses_per_guild_prefix() -> None:
 
     text = "\n".join(_replies(world))
     assert "Prefix: `!`" in text
+
+
+# ============================================================ · prefix tests
+# Focused tests verifying the new "·" (middle-dot) prefix works end-to-end
+# for the key commands: ·help, ·afk, ·cr enable, ·jail setup.
+# These use the default Settings prefix (·).
+
+
+def _world_dot_prefix():
+    """World using the default · prefix."""
+    settings = Settings(token="test-token", notify_users=True, command_prefix="·")
+    bot = FakeBot()
+    bot._intents = _FakeIntents()
+    guild = _guild_dot(bot)
+    case_service = CaseService(MemoryCaseRepository())
+    config_service = GuildConfigService(MemoryGuildConfigRepository(), settings=settings)
+    permissions = PermissionChecker(bot, settings, config_service=config_service)
+    moderation_service = ModerationService(
+        bot,
+        case_service,
+        settings=settings,
+        permissions=permissions,
+        config_service=config_service,
+    )
+    custom_roles = CustomRoleService(settings, permissions, config_service)
+    bot.custom_roles = custom_roles
+    bot.moderation_service = moderation_service
+    bot.permissions = permissions
+    bot.config_service = config_service
+    bot.case_service = case_service
+    dispatcher = PrefixDispatcher(bot, settings)
+    return {
+        "settings": settings,
+        "bot": bot,
+        "guild": guild,
+        "case_service": case_service,
+        "config_service": config_service,
+        "permissions": permissions,
+        "moderation_service": moderation_service,
+        "custom_roles": custom_roles,
+        "dispatcher": dispatcher,
+    }
+
+
+def _guild_dot(bot: FakeBot) -> FakeGuild:
+    bot_member = FakeMember(
+        100_000,
+        "eclipse",
+        roles=[FakeRole(900, "bot", 9)],
+        guild_permissions=FakePermissions(
+            moderate_members=True,
+            kick_members=True,
+            ban_members=True,
+            manage_roles=True,
+            manage_nicknames=True,
+        ),
+        bot=True,
+    )
+    channel = FakeChannel(20, "general")
+    guild = FakeGuild(10, owner_id=1, me=bot_member, members=[bot_member], channels=[channel])
+    channel.guild = guild
+    return guild
+
+
+async def test_dot_help_with_dot_prefix() -> None:
+    """·help responds with the Eclipse help embed."""
+    world = _world_dot_prefix()
+    guild = world["guild"]
+    admin = FakeMember(
+        2,
+        "admin",
+        roles=[FakeRole(100, "admin", 8)],
+        guild=guild,
+        guild_permissions=FakePermissions(manage_roles=True, moderate_members=True),
+    )
+    await _dispatch(world, _message(world, admin, "·help"))
+
+    replies = _replies(world)
+    assert len(replies) > 0, "·help should produce a response"
+    text = "\n".join(replies)
+    assert "Eclipse Help" in text
+    assert "Prefix: `·`" in text
+    assert "Moderation" in text
+
+
+async def test_dot_afk_sets_afk_state() -> None:
+    """·afk enables AFK state for the user."""
+    world = _world_dot_prefix()
+    guild = world["guild"]
+    # Need AFK service
+    from bot.services.afk import AfkService
+
+    afk_service = AfkService()
+    world["bot"].afk_service = afk_service
+
+    user = FakeMember(
+        4, "TestUser", roles=[FakeRole(50, "user", 1)], guild=guild,
+        guild_permissions=FakePermissions(),
+    )
+    guild.members.append(user)
+    await _dispatch(world, _message(world, user, "·afk"))
+
+    replies = _replies(world)
+    assert len(replies) > 0, "·afk should produce a response"
+    text = "\n".join(replies)
+    assert "AFK" in text
+    # Check that nickname was changed
+    assert user.display_name.startswith("AFK | ")
+
+
+async def test_dot_afk_disabled_after_message() -> None:
+    """·afk sets AFK; sending another message removes it."""
+    world = _world_dot_prefix()
+    guild = world["guild"]
+    from bot.services.afk import AfkService
+
+    afk_service = AfkService()
+    world["bot"].afk_service = afk_service
+
+    user = FakeMember(
+        4, "TestUser", roles=[FakeRole(50, "user", 1)], guild=guild,
+        guild_permissions=FakePermissions(),
+    )
+    guild.members.append(user)
+    # Set AFK
+    await _dispatch(world, _message(world, user, "·afk"))
+    assert user.display_name.startswith("AFK | ")
+
+    # Send another message — AFK should be removed
+    world["guild"].channels[0].sent_messages.clear()
+    world["guild"].channels[0].sent_embeds.clear()
+    await _dispatch(world, _message(world, user, "·afk"))
+    replies = _replies(world)
+    text = "\n".join(replies)
+    assert "Welcome Back" in text or "welcome back" in text.lower()
+
+
+async def test_dot_cr_enable_with_dot_prefix() -> None:
+    """·cr enable creates the custom role."""
+    world = _world_dot_prefix()
+    guild = world["guild"]
+    admin = FakeMember(
+        2,
+        "admin",
+        roles=[FakeRole(100, "admin", 8)],
+        guild=guild,
+        guild_permissions=FakePermissions(manage_roles=True),
+    )
+    await _dispatch(world, _message(world, admin, "·cr enable"))
+
+    replies = _replies(world)
+    assert len(replies) > 0, "·cr enable should produce a response"
+    text = "\n".join(replies)
+    assert "enabled" in text.lower()
+    config = world["config_service"].get(guild.id)
+    assert config.custom_roles_enabled is True
+
+
+async def test_dot_cr_disabled_response() -> None:
+    """·cr rename when disabled tells user to enable first."""
+    world = _world_dot_prefix()
+    guild = world["guild"]
+    admin = FakeMember(
+        2,
+        "admin",
+        roles=[FakeRole(100, "admin", 8)],
+        guild=guild,
+        guild_permissions=FakePermissions(manage_roles=True),
+    )
+    await _dispatch(world, _message(world, admin, "·cr rename NewName"))
+
+    replies = _replies(world)
+    assert len(replies) > 0, "·cr rename (disabled) should produce a response"
+    text = "\n".join(replies)
+    assert "disabled" in text.lower() or "enable" in text.lower()
+
+
+async def test_dot_jail_setup_with_dot_prefix() -> None:
+    """·jail setup configures the jail system."""
+    world = _world_dot_prefix()
+    guild = world["guild"]
+    from bot.services.jail import JailService
+
+    jail_service = JailService(world["permissions"], world["config_service"])
+    world["bot"].jail_service = jail_service
+
+    admin = FakeMember(
+        2,
+        "admin",
+        roles=[FakeRole(100, "admin", 8)],
+        guild=guild,
+        guild_permissions=FakePermissions(manage_roles=True, manage_channels=True, administrator=True),
+    )
+    await _dispatch(world, _message(world, admin, "·jail setup"))
+
+    replies = _replies(world)
+    assert len(replies) > 0, "·jail setup should produce a response"
+    text = "\n".join(replies)
+    assert "jail" in text.lower()
+    config = world["config_service"].get(guild.id)
+    assert config.jail_role_id is not None
+
+
+async def test_normal_message_without_prefix_ignored() -> None:
+    """A normal message without the prefix is not handled."""
+    world = _world_dot_prefix()
+    guild = world["guild"]
+    user = FakeMember(
+        4, "member", roles=[FakeRole(50, "user", 1)], guild=guild,
+        guild_permissions=FakePermissions(),
+    )
+    handled = await _dispatch(world, _message(world, user, "hello world"))
+    assert handled is False
+    assert _replies(world) == []
+
+
+async def test_dot_prefix_help_with_dot_prefix() -> None:
+    """·help works with the · prefix."""
+    world = _world_dot_prefix()
+    guild = world["guild"]
+    admin = FakeMember(
+        2,
+        "admin",
+        roles=[FakeRole(100, "admin", 8)],
+        guild=guild,
+        guild_permissions=FakePermissions(manage_roles=True, moderate_members=True),
+    )
+    await _dispatch(world, _message(world, admin, "·help"))
+
+    replies = _replies(world)
+    assert len(replies) > 0
+    text = "\n".join(replies)
+    assert "Eclipse Help" in text
+    assert "Prefix: `·`" in text

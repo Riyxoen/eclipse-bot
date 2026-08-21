@@ -37,7 +37,7 @@ def test_defaults_applied(fake_token: str, monkeypatch: pytest.MonkeyPatch) -> N
     assert settings.log_file is None
     assert settings.shutdown_timeout_seconds == 10.0
     assert settings.enable_message_content_intent is True  # prefix commands need it
-    assert settings.command_prefix == "."
+    assert settings.command_prefix == "·"
 
 
 def test_missing_token_raises_config_error() -> None:
@@ -126,7 +126,7 @@ def test_command_prefix_default_and_override(
     fake_token: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("DISCORD_TOKEN", fake_token)
-    assert load_settings().command_prefix == "."
+    assert load_settings().command_prefix == "·"
     monkeypatch.setenv("RIYXOEN_COMMAND_PREFIX", "!")
     assert load_settings().command_prefix == "!"
 

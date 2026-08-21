@@ -212,20 +212,50 @@ class PrefixDispatcher:
 
     async def handle(self, message: discord.Message) -> bool:
         """Handle ``message`` if it is a prefix command; return whether it was."""
+        # --- diagnostic logging (safe metadata only, no content) ---
+        guild_id = getattr(message.guild, "id", None)
+        author_id = getattr(message.author, "id", None)
+        has_content = bool(getattr(message, "content", ""))
+        content_len = len(getattr(message, "content", ""))
+        logger.debug(
+            "prefix.handle: guild=%s author=%s has_content=%s len=%s",
+            guild_id, author_id, has_content, content_len,
+        )
+
         if message.guild is None:
+            logger.debug("prefix.handle: ignoring DM (no guild)")
             return False
         if getattr(message.author, "bot", False):
+            logger.debug("prefix.handle: ignoring bot author=%s", author_id)
             return False
         if not getattr(message, "content", ""):
+            logger.debug("prefix.handle: ignoring empty content author=%s", author_id)
             return False
         if self.bot.user is not None and message.author.id == self.bot.user.id:
+            logger.debug("prefix.handle: ignoring own message author=%s", author_id)
             return False
         if not self._content_available():
+            logger.debug("prefix.handle: message_content intent unavailable")
             return False
 
-        parsed = parse_prefix_command(message.content, self._prefix_for(message.guild))
+        prefix = self._prefix_for(message.guild)
+        starts_with_prefix = message.content.startswith(prefix)
+        logger.debug(
+            "prefix.handle: guild=%s prefix=%r starts_with=%s",
+            guild_id, prefix, starts_with_prefix,
+        )
+
+        parsed = parse_prefix_command(message.content, prefix)
         if parsed is None:
+            logger.debug(
+                "prefix.handle: parse_prefix_command returned None (guild=%s prefix=%r)",
+                guild_id, prefix,
+            )
             return False
+        logger.debug(
+            "prefix.handle: parsed name=%s sub=%s args_len=%d",
+            parsed.name, parsed.subcommand, len(parsed.arguments),
+        )
 
         if not self.rate_limiter.allow(message.author.id):
             await self._reply(
@@ -284,16 +314,23 @@ class PrefixDispatcher:
         return self.settings.command_prefix
 
     async def _route(self, message: discord.Message, parsed: ParsedCommand) -> None:
+        logger.debug(
+            "prefix.route: guild=%s name=%s sub=%s",
+            getattr(message.guild, "id", None), parsed.name, parsed.subcommand,
+        )
         if parsed.name in ("el", "cr"):
             await self._route_custom_roles(message, parsed)
             return
         if parsed.name == "help":
+            logger.debug("prefix.route: dispatching to _route_help")
             await self._route_help(message)
             return
         if parsed.name == "afk":
+            logger.debug("prefix.route: dispatching to _route_afk")
             await self._route_afk(message, parsed)
             return
         if parsed.name == "jail":
+            logger.debug("prefix.route: dispatching to _route_jail")
             await self._route_jail(message, parsed)
             return
         if parsed.name == "unjail":
