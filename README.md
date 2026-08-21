@@ -372,3 +372,6 @@ Development costs $0. There are no paid APIs, hosted databases, cloud services, 
 - Optional web dashboard and API server
 
 *(All require explicit approval; nothing here is built yet.)*
+
+For support please contact me via discord:riyxo
+Or create an issue!
