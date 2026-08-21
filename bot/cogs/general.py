@@ -15,7 +15,7 @@ from discord import app_commands
 logger = logging.getLogger("riyxoen.general")
 
 HELP_TEXT = (
-    "**Riyxoen commands**\n"
+    "**Eclipse commands**\n"
     "- `/ping` — Check the bot's latency\n"
     "- `/help` — Show this help\n"
     "- `/health ping` — Health check\n"

@@ -58,6 +58,11 @@ def clean_bot_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
         "RIYXOEN_AUTOMOD_RAID_ACTION",
     ):
         monkeypatch.delenv(key, raising=False)
+    # Clean up any test databases
+    import shutil
+    data_dir = tmp_path / "data"
+    if data_dir.exists():
+        shutil.rmtree(data_dir, ignore_errors=True)
 
 
 @pytest.fixture

@@ -119,7 +119,7 @@ async def test_enable_creates_role_and_persists_state() -> None:
     assert config.custom_role_id is not None
     role = guild.get_role(config.custom_role_id)
     assert role is not None
-    assert role.name == "Riyxoen Custom"
+    assert role.name == "Eclipse Custom"
 
 
 async def test_enable_is_idempotent_and_never_duplicates() -> None:

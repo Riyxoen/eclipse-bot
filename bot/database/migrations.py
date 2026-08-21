@@ -68,6 +68,29 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
     (4, _SCHEMA_V4),
 )
 
+# Phase 11: AFK state persistence. Stores the user's AFK status, original
+# nickname, and optional custom message per guild. Additive; a fresh table
+# does not touch existing data.
+_SCHEMA_V5 = """
+CREATE TABLE IF NOT EXISTS afk_state (
+    guild_id       INTEGER NOT NULL,
+    user_id        INTEGER NOT NULL,
+    original_name  TEXT    NOT NULL,
+    afk_message    TEXT    NOT NULL DEFAULT '',
+    set_at         TEXT    NOT NULL,
+    PRIMARY KEY (guild_id, user_id)
+);
+"""
+
+#: Ordered list of migrations: (schema version, SQL script).
+MIGRATIONS: tuple[tuple[int, str], ...] = (
+    (1, _SCHEMA_V1),
+    (2, _SCHEMA_V2),
+    (3, _SCHEMA_V3),
+    (4, _SCHEMA_V4),
+    (5, _SCHEMA_V5),
+)
+
 #: The newest schema version the code understands.
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1][0]
 

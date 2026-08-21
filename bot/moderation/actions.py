@@ -22,6 +22,11 @@ ACTION_LOCK = "lock"
 ACTION_UNLOCK = "unlock"
 #: Single-message deletion (used by the automated moderation engine).
 ACTION_DELETE = "delete"
+#: Jail/unjail actions.
+ACTION_JAIL = "jail"
+ACTION_UNJAIL = "unjail"
+#: Untimeout (manual timeout removal via prefix command).
+ACTION_UNTIMEOUT = "untimeout"
 
 #: Read-only action: viewing moderation history (no Discord mutation).
 ACTION_VIEW_CASES = "view_cases"
@@ -38,10 +43,13 @@ ALL_ACTIONS = (
     ACTION_LOCK,
     ACTION_UNLOCK,
     ACTION_DELETE,
+    ACTION_JAIL,
+    ACTION_UNJAIL,
+    ACTION_UNTIMEOUT,
 )
 
 #: Actions that result in a DM notification to the affected user.
-PUNISHMENT_ACTIONS = (ACTION_WARN, ACTION_TIMEOUT, ACTION_UNMUTE, ACTION_KICK, ACTION_BAN)
+PUNISHMENT_ACTIONS = (ACTION_WARN, ACTION_TIMEOUT, ACTION_UNMUTE, ACTION_KICK, ACTION_BAN, ACTION_JAIL)
 
 #: Discord permission attribute names required for each action.
 #:
@@ -65,6 +73,11 @@ ACTION_REQUIRED_PERMISSIONS: dict[str, tuple[str, ...]] = {
     ACTION_SLOWMODE: ("manage_channels",),
     ACTION_LOCK: ("manage_channels",),
     ACTION_UNLOCK: ("manage_channels",),
+    # Jail/unjail require manage_roles (to add/remove the jail role).
+    ACTION_JAIL: ("moderate_members", "manage_roles"),
+    ACTION_UNJAIL: ("moderate_members", "manage_roles"),
+    # Untimeout uses moderate_members (same as timeout).
+    ACTION_UNTIMEOUT: ("moderate_members",),
     # Viewing moderation history requires moderation permissions (there is no
     # dedicated Discord permission for it; ``moderate_members`` is the closest
     # fit). Configured moderator roles are also honored by the checker.

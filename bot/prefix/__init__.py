@@ -1,39 +1,37 @@
-"""Prefix (text) commands for the bot (Phase 6 + Phase 10).
+"""Prefix (text) commands for Eclipse.
 
 The bot's primary interface is slash commands, but a set of text commands
-uses a configurable prefix (``.`` by default):
+uses a configurable prefix (``·`` by default):
 
-    .el enable | .el rename <name> | .el color <hex>
-    .warn @user <reason> | .warnings @user | .clearwarnings @user
-    .modhistory @user [page]
-    .ban @user <reason> | .kick @user <reason>
-    .mute @user <duration> <reason> | .unmute @user <reason>
-    .purge <amount> | .slowmode <seconds>
-    .lockdown | .unlockdown
-    .help
+    ·cr enable | ·cr rename <name> | ·cr color <hex>
+    ·warn @user <reason> | ·warnings @user | ·clearwarnings @user
+    ·modhistory @user [page]
+    ·ban @user <reason> | ·kick @user <reason>
+    ·mute @user <duration> <reason> | ·unmute @user <reason>
+    ·untimeout @user [reason]
+    ·purge <amount> | ·slowmode <seconds>
+    ·lockdown | ·unlockdown
+    ·afk [message]
+    ·jail setup | ·jail @user [reason] | ·unjail @user
+    ·help
 
 The prefix is per-guild: an administrator can change it with ``/config
-prefix`` and the dispatcher honors it per message (Phase 10).
+prefix`` and the dispatcher honors it per message.
 
-Handlers stay thin: they parse the message, delegate to the service layer
-(:class:`bot.services.custom_roles.CustomRoleService` and
-:class:`bot.services.moderation.ModerationService`), and format safe
-responses. All permission, hierarchy, and state checks live in the services
-— never here.
+Handlers stay thin: they parse the message, delegate to the service layer,
+and format safe responses. All permission, hierarchy, and state checks live
+in the services — never here.
 
 Safety:
-
-- Prefix commands require the ``message_content`` intent (on by default
-  since Phase 6); when it is unavailable the dispatcher logs once and no-ops.
+- Prefix commands require the ``message_content`` intent.
 - Only guild messages are processed; bots are ignored.
-- Every failure is caught and surfaced as a safe message; details go to the
-  logs. Nothing internal ever reaches Discord.
-- Moderation actions reuse the existing case/audit/log-channel pipeline —
-  there is no second moderation system.
+- Every failure is caught and surfaced as a safe message.
+- Moderation actions reuse the existing case/audit/log-channel pipeline.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections import OrderedDict, deque
@@ -47,7 +45,10 @@ import discord
 from bot.configuration.settings import Settings
 from bot.moderation.actions import ACTION_VIEW_CASES, ACTION_WARN
 from bot.moderation.cases import STATUS_CLEARED, STATUS_SUCCESS, utc_now
-from bot.moderation.errors import InvalidTargetError, ModerationError
+from bot.moderation.errors import (
+    InvalidTargetError,
+    ModerationError,
+)
 from bot.moderation.response import format_case_list, format_case_response
 from bot.moderation.validation import (
     parse_duration,
@@ -56,6 +57,15 @@ from bot.moderation.validation import (
 )
 from bot.services.custom_roles import CustomRoleService
 from bot.services.moderation import ModerationService
+from bot.utilities.embeds import (
+    afk_embed,
+    custom_role_embed,
+    error_embed,
+    info_embed,
+    jail_embed,
+    moderation_action_embed,
+    success_embed,
+)
 
 logger = logging.getLogger("riyxoen.prefix")
 
@@ -75,16 +85,7 @@ _COMMAND_PATTERN = re.compile(r"^([A-Za-z]+)(?:\s|$)")
 
 
 class PrefixRateLimiter:
-    """Bounded in-memory rate limiter for prefix commands (anti-abuse).
-
-    Prevents a single user from hammering the text commands (``.ban``,
-    ``.el``, ...) faster than :data:`PREFIX_COMMAND_LIMIT` commands per
-    :data:`PREFIX_COMMAND_WINDOW_SECONDS` — every call past the limit is a
-    Discord API request or a case write, so the limiter keeps abuse local and
-    free. Memory is bounded: at most :data:`PREFIX_MAX_TRACKED_USERS` users
-    are tracked, each holding a fixed-size deque of timestamps, and stale
-    entries are pruned on access and on overflow (oldest-inserted first).
-    """
+    """Bounded in-memory rate limiter for prefix commands (anti-abuse)."""
 
     def __init__(
         self,
@@ -113,7 +114,6 @@ class PrefixRateLimiter:
                 self._evict_oldest()
             stamps = deque(maxlen=self.limit + 1)
             self._timestamps[user_id] = stamps
-        # Drop timestamps outside the window.
         while stamps and stamps[0] < cutoff:
             stamps.popleft()
         if len(stamps) >= self.limit:
@@ -148,12 +148,7 @@ class ParsedCommand:
 
 def parse_prefix_command(content: str, prefix: str) -> ParsedCommand | None:
     """Parse ``content`` into a :class:`ParsedCommand`, or ``None`` when the
-    message is not a prefix command.
-
-    Pure and unit-testable: ``".el rename Cool"`` -> ``name="el"``,
-    ``subcommand="rename"``, ``arguments="Cool"``; ``".ban @u reason"`` ->
-    ``name="ban"``, ``subcommand=None``, ``arguments="@u reason"``.
-    """
+    message is not a prefix command."""
     if not content or not prefix:
         return None
     if not content.startswith(prefix):
@@ -165,10 +160,12 @@ def parse_prefix_command(content: str, prefix: str) -> ParsedCommand | None:
     name = match.group(1).lower()
     remainder = rest[match.end() :].strip()
     parts = remainder.split(maxsplit=1)
-    if name == "el" and parts:
+    if name in ("el", "cr") and parts:
         subcommand = parts[0].lower()
         arguments = parts[1] if len(parts) > 1 else ""
         return ParsedCommand(name=name, subcommand=subcommand, arguments=arguments)
+    if name == "jail" and parts and parts[0].lower() == "setup":
+        return ParsedCommand(name=name, subcommand="setup", arguments="")
     return ParsedCommand(name=name, subcommand=None, arguments=remainder)
 
 
@@ -181,12 +178,7 @@ def parse_member_id(arguments: str) -> int | None:
 
 
 def split_target_and_reason(arguments: str) -> tuple[str | None, str]:
-    """Split ``arguments`` into ``(member_id_text, reason)``.
-
-    The target is the leading mention; the remainder is the reason (which may
-    contain spaces). A missing mention yields ``(None, whole_text)`` so the
-    command layer can report ``User not found.``.
-    """
+    """Split ``arguments`` into ``(member_id_text, reason)``."""
     stripped = arguments.strip()
     match = _MENTION_PATTERN.match(stripped)
     if match is None:
@@ -196,11 +188,7 @@ def split_target_and_reason(arguments: str) -> tuple[str | None, str]:
 
 
 def format_moderation_reply(record, *, target_label: str, moderator_label: str) -> str:
-    """The case summary for prefix moderation commands.
-
-    Appends a private note when the DM to the punished user could not be
-    delivered (the action itself still succeeded — never the reverse).
-    """
+    """The case summary for prefix moderation commands."""
     text = format_case_response(record, target_label=target_label, moderator_label=moderator_label)
     if (record.metadata or {}).get("dm_delivered") is False:
         text += "\n_Note: the user could not be DM'd (their DMs may be closed)._"
@@ -208,11 +196,7 @@ def format_moderation_reply(record, *, target_label: str, moderator_label: str) 
 
 
 class PrefixDispatcher:
-    """Routes guild text messages starting with the configured prefix.
-
-    ``bot`` must expose ``settings``, ``custom_roles``, ``moderation_service``,
-    and ``permissions`` (set up in ``setup_hook``).
-    """
+    """Routes guild text messages starting with the configured prefix."""
 
     def __init__(
         self,
@@ -227,10 +211,7 @@ class PrefixDispatcher:
         self._warned_no_intent = False
 
     async def handle(self, message: discord.Message) -> bool:
-        """Handle ``message`` if it is a prefix command; return whether it was.
-
-        Never raises: every failure is logged and surfaced as a safe reply.
-        """
+        """Handle ``message`` if it is a prefix command; return whether it was."""
         if message.guild is None:
             return False
         if getattr(message.author, "bot", False):
@@ -246,12 +227,10 @@ class PrefixDispatcher:
         if parsed is None:
             return False
 
-        # Anti-abuse: a user exceeding the local command rate gets a safe
-        # reply and the command is not run (no Discord API call is made).
         if not self.rate_limiter.allow(message.author.id):
             await self._reply(
                 message,
-                "You're sending commands too quickly — please slow down.",
+                embed=error_embed("Rate Limited", "You're sending commands too quickly — please slow down."),
             )
             return True
 
@@ -264,27 +243,27 @@ class PrefixDispatcher:
         try:
             await self._route(message, parsed)
         except ModerationError as exc:
-            await self._reply(message, exc.user_message)
-        except Exception:  # noqa: BLE001 - the bot must never crash on a message
+            await self._reply(message, embed=error_embed("Error", exc.user_message))
+        except Exception:  # noqa: BLE001
             logger.exception(
                 "unhandled prefix command failure: guild=%s command=%s",
                 message.guild.id,
                 parsed.name,
             )
-            await self._reply(message, "Something went wrong while running that command.")
+            await self._reply(
+                message,
+                embed=error_embed("Error", "Something went wrong while running that command."),
+            )
         self.rate_limiter.prune()
         return True
 
     def _content_available(self) -> bool:
-        """Whether the message-content intent is available for prefix parsing."""
         intents = getattr(self.bot, "intents", None)
         if intents is not None and not getattr(intents, "message_content", False):
             if not self._warned_no_intent:
                 logger.warning(
                     "message_content intent is disabled — prefix commands "
-                    "(.el, .ban, ...) will not work. Enable "
-                    "RIYXOEN_ENABLE_MESSAGE_CONTENT_INTENT=1 (and the intent "
-                    "in the Discord developer portal)."
+                    "will not work. Enable RIYXOEN_ENABLE_MESSAGE_CONTENT_INTENT=1."
                 )
                 self._warned_no_intent = True
             return False
@@ -293,17 +272,11 @@ class PrefixDispatcher:
     # ------------------------------------------------------------- routing
 
     def _prefix_for(self, guild: Any) -> str:
-        """The text-command prefix for ``guild`` (per-guild override wins).
-
-        Phase 10: administrators set a per-guild prefix via ``/config prefix``;
-        it is honored per message so the change applies immediately. A config
-        read failure degrades to the global environment prefix.
-        """
         config_service = getattr(self.bot, "config_service", None)
         if config_service is not None and guild is not None:
             try:
                 return config_service.get(guild.id).command_prefix
-            except Exception:  # noqa: BLE001 - config must never break commands
+            except Exception:  # noqa: BLE001
                 logger.exception(
                     "could not load per-guild command prefix for guild %s",
                     getattr(guild, "id", None),
@@ -311,69 +284,306 @@ class PrefixDispatcher:
         return self.settings.command_prefix
 
     async def _route(self, message: discord.Message, parsed: ParsedCommand) -> None:
-        if parsed.name == "el":
-            await self._route_el(message, parsed)
+        if parsed.name in ("el", "cr"):
+            await self._route_custom_roles(message, parsed)
             return
         if parsed.name == "help":
             await self._route_help(message)
+            return
+        if parsed.name == "afk":
+            await self._route_afk(message, parsed)
+            return
+        if parsed.name == "jail":
+            await self._route_jail(message, parsed)
+            return
+        if parsed.name == "unjail":
+            await self._route_unjail(message, parsed)
+            return
+        if parsed.name == "untimeout":
+            await self._route_untimeout(message, parsed)
             return
         handler = _MODERATION_HANDLERS.get(parsed.name)
         if handler is not None:
             await handler(self, message, parsed)
             return
-        # The message started with the prefix and a command word, but there is
-        # no handler for it. Reply clearly instead of silently ignoring it.
-        await self._reply(message, "Command unavailable. Try `.help` for the command list.")
+        prefix = self._prefix_for(message.guild)
+        await self._reply(
+            message,
+            embed=error_embed("Unknown Command", f"Try `{prefix}help` for the command list."),
+        )
 
-    async def _route_el(self, message: discord.Message, parsed: ParsedCommand) -> None:
+    # -------------------------------------------------------- custom roles
+
+    async def _route_custom_roles(self, message: discord.Message, parsed: ParsedCommand) -> None:
         service: CustomRoleService = self.bot.custom_roles
         subcommand = parsed.subcommand or ""
+        prefix = self._prefix_for(message.guild)
+        cmd = parsed.name  # "el" or "cr"
+
         if subcommand == "enable":
             enabled = await service.enable(message.guild, message.author)
             if not enabled:
-                # Idempotent: already enabled before this call.
                 await self._reply(
                     message,
-                    "The custom-role system is already enabled in this server.",
+                    embed=info_embed("Already Enabled", "The custom-role system is already enabled in this server."),
                 )
                 return
             role = service.managed_role(message.guild)
             await self._reply(
                 message,
-                "Custom-role system enabled. "
-                f"Managed role: **{getattr(role, 'name', 'Riyxoen Custom')}** "
-                f"({getattr(role, 'mention', '')}). Use `.el rename <name>` and "
-                "`.el color <hex>` to customize it.",
+                embed=custom_role_embed(
+                    "Custom Role Enabled",
+                    f"Managed role: {getattr(role, 'mention', 'Created')} "
+                    f"({getattr(role, 'name', 'Eclipse Custom')})",
+                    fields=[
+                        ("Rename", f"`{prefix}{cmd} rename <name>`"),
+                        ("Color", f"`{prefix}{cmd} color <hex>`"),
+                    ],
+                ),
             )
             return
+
         if subcommand == "rename":
             if not parsed.arguments.strip():
-                raise InvalidTargetError("Usage: `.el rename <new name>` — provide a role name.")
+                raise InvalidTargetError(f"Usage: `{prefix}{cmd} rename <new name>` — provide a role name.")
             await service.rename(message.guild, message.author, parsed.arguments.strip())
-            await self._reply(message, f"Custom role renamed to **{parsed.arguments.strip()}**.")
+            await self._reply(
+                message,
+                embed=custom_role_embed("Role Renamed", f"Custom role renamed to **{parsed.arguments.strip()}**."),
+            )
             return
+
         if subcommand == "color":
             if not parsed.arguments.strip():
                 raise InvalidTargetError(
-                    "Usage: `.el color <hex>` — provide a hex color like #ff0000."
+                    f"Usage: `{prefix}{cmd} color <hex>` — provide a hex color like #ff0000."
                 )
             hex_color = parsed.arguments.strip()
             await service.color(message.guild, message.author, hex_color)
             await self._reply(
                 message,
-                f"Custom role color set to **#{hex_color.lstrip('#').lower()}**.",
+                embed=custom_role_embed(
+                    "Color Updated",
+                    f"Custom role color set to **#{hex_color.lstrip('#').lower()}**.",
+                ),
             )
             return
+
         raise InvalidTargetError(
-            "Unknown `.el` subcommand. Available: `.el enable`, `.el rename <name>`, "
-            "`.el color <hex>`."
+            f"Unknown `{prefix}{cmd}` subcommand. Available: "
+            f"`{prefix}{cmd} enable`, `{prefix}{cmd} rename <name>`, "
+            f"`{prefix}{cmd} color <hex>`."
+        )
+
+    # --------------------------------------------------------------- AFK
+
+    async def _route_afk(self, message: discord.Message, parsed: ParsedCommand) -> None:
+        afk_service = getattr(self.bot, "afk_service", None)
+        if afk_service is None:
+            await self._reply(message, embed=error_embed("Unavailable", "The AFK system is not available."))
+            return
+
+        guild = message.guild
+        author = message.author
+        state = afk_service.get(guild.id, author.id)
+
+        # If already AFK, remove AFK state
+        if state is not None:
+            removed = afk_service.remove(guild.id, author.id)
+            if removed:
+                # Restore nickname
+                original_name = removed.original_name
+                display = getattr(author, "display_name", author.name)
+                if display.startswith("AFK | "):
+                    await afk_service.restore_nickname(author, original_name)
+            await self._reply(
+                message,
+                embed=success_embed("Welcome Back!", f"Welcome back, {author.mention}! Your AFK has been removed."),
+            )
+            return
+
+        # Set AFK state
+        display_name = getattr(author, "display_name", author.name)
+        afk_message = parsed.arguments.strip() if parsed.arguments else ""
+        afk_service.set_afk(guild.id, author.id, display_name, afk_message)
+
+        # Change nickname
+        afk_name = f"AFK | {display_name}"
+        await afk_service.apply_nickname(member=author, afk_name=afk_name)
+
+        desc = f"{author.mention} is now AFK."
+        if afk_message:
+            desc += f"\n> {afk_message}"
+        await self._reply(message, embed=afk_embed("AFK", desc))
+
+    # --------------------------------------------------------------- jail
+
+    async def _route_jail(self, message: discord.Message, parsed: ParsedCommand) -> None:
+        jail_service = getattr(self.bot, "jail_service", None)
+        if jail_service is None:
+            await self._reply(message, embed=error_embed("Unavailable", "The jail system is not available."))
+            return
+
+        subcommand = parsed.subcommand or ""
+        prefix = self._prefix_for(message.guild)
+
+        if subcommand == "setup":
+            try:
+                await jail_service.setup(message.guild, message.author)
+                role = jail_service.get_jail_role(message.guild)
+                channel = jail_service.get_jail_channel(message.guild)
+                fields = []
+                if role:
+                    fields.append(("Jail Role", role.mention))
+                if channel:
+                    fields.append(("Jail Channel", channel.mention))
+                else:
+                    fields.append(("Jail Channel", "Not configured"))
+                await self._reply(
+                    message,
+                    embed=jail_embed(
+                        "Jail System Configured",
+                        "The jail system is now active.",
+                        fields=fields,
+                    ),
+                )
+            except ModerationError as exc:
+                await self._reply(message, embed=error_embed("Setup Failed", exc.user_message))
+            return
+
+        if subcommand in ("jail", ""):
+            # ·jail @user [reason]
+            if not parsed.subcommand:
+                # It's ·jail @user [reason] (no subcommand, just target)
+                pass
+            else:
+                # subcommand was "jail" which is wrong
+                raise InvalidTargetError(
+                    f"Usage: `{prefix}jail @user [reason]` or `{prefix}jail setup`."
+                )
+
+        # Jail a user
+        target_id_text, reason = split_target_and_reason(parsed.arguments)
+        if target_id_text is None:
+            raise InvalidTargetError(f"Mention the user to jail, e.g. `{prefix}jail @user reason`.")
+        member = message.guild.get_member(int(target_id_text))
+        if member is None:
+            raise InvalidTargetError("User not found.")
+
+        if not reason:
+            reason = "No reason provided"
+
+        try:
+            previous_role_ids = await jail_service.jail(
+                message.guild, message.author, member, reason
+            )
+            # Create a jail case
+            service: ModerationService = self.bot.moderation_service
+            record = await service._punish(
+                "jail",
+                message.guild,
+                message.author,
+                member,
+                reason=reason,
+                execute=lambda: asyncio.sleep(0),  # type: ignore[misc]  # no-op, jail already applied
+                metadata={"previous_role_ids": previous_role_ids},
+            )
+            await self._reply(
+                message,
+                embed=jail_embed(
+                    "User Jailed",
+                    fields=[
+                        ("Target", member.mention),
+                        ("Moderator", message.author.mention),
+                        ("Reason", reason),
+                        ("Case", f"#{record.case_id}"),
+                    ],
+                ),
+            )
+        except ModerationError as exc:
+            await self._reply(message, embed=error_embed("Jail Failed", exc.user_message))
+
+    async def _route_unjail(self, message: discord.Message, parsed: ParsedCommand) -> None:
+        jail_service = getattr(self.bot, "jail_service", None)
+        if jail_service is None:
+            await self._reply(message, embed=error_embed("Unavailable", "The jail system is not available."))
+            return
+
+        prefix = self._prefix_for(message.guild)
+        target_id_text, _reason = split_target_and_reason(parsed.arguments)
+        if target_id_text is None:
+            raise InvalidTargetError(f"Mention the user to unjail, e.g. `{prefix}unjail @user`.")
+        member = message.guild.get_member(int(target_id_text))
+        if member is None:
+            raise InvalidTargetError("User not found.")
+
+        # Find previous roles from the jail case
+        case_service = self.bot.case_service
+        jail_meta = jail_service.find_jail_case_metadata(
+            message.guild.id, member.id, case_service
+        )
+        previous_role_ids = (jail_meta or {}).get("previous_role_ids", [])
+
+        try:
+            await jail_service.unjail(
+                message.guild, message.author, member, previous_role_ids
+            )
+            # Create an unjail case
+            service: ModerationService = self.bot.moderation_service
+            record = await service._punish(
+                "unjail",
+                message.guild,
+                message.author,
+                member,
+                reason="Released from jail",
+                execute=lambda: asyncio.sleep(0),  # type: ignore[misc]
+                metadata={"previous_role_ids": previous_role_ids},
+            )
+            await self._reply(
+                message,
+                embed=success_embed(
+                    "User Unjailed",
+                    fields=[
+                        ("Target", member.mention),
+                        ("Moderator", message.author.mention),
+                        ("Roles Restored", str(len(previous_role_ids))),
+                        ("Case", f"#{record.case_id}"),
+                    ],
+                ),
+            )
+        except ModerationError as exc:
+            await self._reply(message, embed=error_embed("Unjail Failed", exc.user_message))
+
+    # ---------------------------------------------------------- untimeout
+
+    async def _route_untimeout(self, message: discord.Message, parsed: ParsedCommand) -> None:
+        prefix = self._prefix_for(message.guild)
+        target_id_text, reason = split_target_and_reason(parsed.arguments)
+        if target_id_text is None:
+            raise InvalidTargetError(f"Mention the user, e.g. `{prefix}untimeout @user [reason]`.")
+        member = message.guild.get_member(int(target_id_text))
+        if member is None:
+            raise InvalidTargetError("User not found.")
+
+        service: ModerationService = self.bot.moderation_service
+        record = await service.untimeout(
+            message.guild, message.author, member, reason or "No reason provided"
+        )
+        await self._reply(
+            message,
+            embed=moderation_action_embed(
+                case_id=record.case_id,
+                action="untimeout",
+                target=member.mention,
+                moderator=message.author.mention,
+                reason=record.reason,
+                status="Success" if record.success else "Failed",
+            ),
         )
 
     # ---------------------------------------------------------------- help
 
     async def _route_help(self, message: discord.Message) -> None:
-        """Show organized command help; restricted sections are hidden for
-        users who cannot use them (Phase 10)."""
         permissions = self.bot.permissions
         guild = message.guild
         author = message.author
@@ -384,47 +594,70 @@ class PrefixDispatcher:
             getattr(author.guild_permissions, "manage_roles", False)
         )
 
-        lines = [f"**Riyxoen help** — prefix `{prefix}`"]
+        embed = discord.Embed(
+            title="Eclipse Help",
+            description=f"Prefix: `{prefix}`",
+            color=0x3498DB,
+        )
+
         if can_moderate:
-            lines.append("\n__Moderation__")
-            lines.append(f"`{prefix}warn @user <reason>` — Warn a member")
-            lines.append(f"`{prefix}warnings @user` — Show a member's warnings")
-            lines.append(f"`{prefix}clearwarnings @user` — Clear a member's warnings")
-            lines.append(f"`{prefix}modhistory @user [page]` — Show moderation history")
-            lines.append(f"`{prefix}purge <amount>` — Bulk-delete recent messages")
-            lines.append(f"`{prefix}slowmode <seconds>` — Set this channel's slowmode")
-            lines.append(f"`{prefix}lockdown` / `{prefix}unlockdown` — Lock/unlock this channel")
-            lines.append(f"`{prefix}ban @user <reason>` — Ban a member (DM first)")
-            lines.append(f"`{prefix}kick @user <reason>` — Kick a member")
-            lines.append(f"`{prefix}mute @user <duration> <reason>` — Mute a member")
-            lines.append(f"`{prefix}unmute @user <reason>` — Unmute a member")
-        if can_manage_roles:
-            lines.append("\n__Custom Roles__")
-            lines.append(f"`{prefix}el enable` — Enable the custom-role system")
-            lines.append(f"`{prefix}el rename <name>` — Rename the managed role")
-            lines.append(f"`{prefix}el color <hex>` — Change the role color")
-        if is_admin:
-            lines.append("\n__Configuration__")
-            lines.append("`/config …` — Server configuration (includes the prefix)")
-            lines.append("`/automod …` — Automated moderation")
-        lines.append("\n__Utility__")
-        lines.append(f"`{prefix}help` — Show this help")
-        lines.append("`/ping` — Bot latency")
-        lines.append("`/case <id>` · `/cases <member>` — Moderation history (slash)")
-        if not (can_moderate or can_manage_roles or is_admin):
-            lines.append(
-                "\n_Some command categories require moderator or administrator permissions._"
+            mod_cmds = (
+                f"`{prefix}warn @user <reason>` — Warn a member\n"
+                f"`{prefix}warnings @user` — Show warnings\n"
+                f"`{prefix}clearwarnings @user` — Clear warnings\n"
+                f"`{prefix}modhistory @user [page]` — Moderation history\n"
+                f"`{prefix}purge <amount>` — Bulk-delete messages\n"
+                f"`{prefix}slowmode <seconds>` — Set slowmode\n"
+                f"`{prefix}lockdown` / `{prefix}unlockdown` — Lock/unlock channel\n"
+                f"`{prefix}ban @user <reason>` — Ban a member\n"
+                f"`{prefix}kick @user <reason>` — Kick a member\n"
+                f"`{prefix}mute @user <duration> <reason>` — Mute a member\n"
+                f"`{prefix}unmute @user <reason>` — Unmute a member\n"
+                f"`{prefix}untimeout @user [reason]` — Remove timeout"
             )
-        await self._reply(message, "\n".join(lines))
+            embed.add_field(name="Moderation", value=mod_cmds, inline=False)
+
+        if can_manage_roles:
+            cr_cmds = (
+                f"`{prefix}cr enable` — Enable custom-role system\n"
+                f"`{prefix}cr rename <name>` — Rename the managed role\n"
+                f"`{prefix}cr color <hex>` — Change the role color"
+            )
+            embed.add_field(name="Custom Roles", value=cr_cmds, inline=False)
+
+        if is_admin:
+            jail_cmds = (
+                f"`{prefix}jail setup` — Configure the jail system\n"
+                f"`{prefix}jail @user [reason]` — Jail a member\n"
+                f"`{prefix}unjail @user` — Release from jail"
+            )
+            embed.add_field(name="Jail", value=jail_cmds, inline=False)
+            embed.add_field(
+                name="Configuration",
+                value="`/config …` — Server configuration\n`/automod …` — Automated moderation",
+                inline=False,
+            )
+
+        util_cmds = (
+            f"`{prefix}afk [message]` — Set AFK status\n"
+            f"`{prefix}help` — Show this help\n"
+            "`/ping` — Bot latency\n"
+            "`/case <id>` · `/cases <member>` — Case history"
+        )
+        embed.add_field(name="Utility", value=util_cmds, inline=False)
+
+        if not (can_moderate or can_manage_roles or is_admin):
+            embed.set_footer(text="Some command categories require moderator or administrator permissions.")
+
+        await self._reply(message, embed=embed)
 
     # ------------------------------------------------------------ moderation
 
     async def _resolve_member(self, message: discord.Message, arguments: str):
-        """Resolve the target member from a mention, or raise a safe error."""
         member_id_text, _reason = split_target_and_reason(arguments)
         if member_id_text is None:
             raise InvalidTargetError(
-                "Mention the user you want to target, e.g. `.ban @user reason`."
+                "Mention the user you want to target."
             )
         member = message.guild.get_member(int(member_id_text))
         if member is None:
@@ -461,28 +694,33 @@ class PrefixDispatcher:
             )
         elif action == "unmute":
             record = await service.unmute(message.guild, message.author, member, reason)
-        else:  # pragma: no cover - routing guarantees a known action
+        else:  # pragma: no cover
             raise InvalidTargetError("Unknown command.")
 
         await self._reply(
             message,
-            format_moderation_reply(
-                record,
-                target_label=member.mention,
-                moderator_label=message.author.mention,
+            embed=moderation_action_embed(
+                case_id=record.case_id,
+                action=record.action,
+                target=member.mention,
+                moderator=message.author.mention,
+                reason=record.reason,
+                status="Success" if record.success else "Failed",
+                duration=f"{record.duration_seconds}s" if record.duration_seconds else None,
+                extra_fields=[
+                    ("Note", "_The user could not be DM'd (their DMs may be closed)._")
+                ] if (record.metadata or {}).get("dm_delivered") is False else None,
             ),
         )
 
     # ------------------------------------------------------- case queries
 
     async def _require_view_permissions(self, message: discord.Message, action: str) -> None:
-        """Guild + moderator gate for case queries (server-side, shared)."""
         permissions = self.bot.permissions
         permissions.require_guild(message.guild)
         permissions.require_moderator(message.author, action)
 
     async def _run_warnings(self, message: discord.Message, parsed: ParsedCommand) -> None:
-        """Show a member's warnings (active count + recent warning cases)."""
         await self._require_view_permissions(message, ACTION_VIEW_CASES)
         member = await self._resolve_member(message, parsed.arguments)
         case_service = self.bot.case_service
@@ -490,21 +728,28 @@ class PrefixDispatcher:
         page = case_service.list_for_member(message.guild.id, member.id, page_size=10)
         warnings = [record for record in page.items if record.action == "warn"]
         if not warnings:
-            await self._reply(message, f"{member.mention} has no warnings.")
+            await self._reply(
+                message,
+                embed=info_embed("No Warnings", f"{member.mention} has no warnings."),
+            )
             return
-        lines = [
-            f"**Warnings for {member.mention}** — {active} active",
-        ]
+
+        lines = []
         for record in warnings:
+            status = "Cleared" if record.status == STATUS_CLEARED else "Active"
             lines.append(
-                f"`#{record.case_id}` {_warning_status_label(record)} | "
-                f"{self._member_label(message.guild, record.moderator_user_id)} | "
+                f"`#{record.case_id}` {status} | "
                 f"{_truncate_reason(record.reason)} | {record.created_at:%Y-%m-%d}"
             )
-        await self._reply(message, "\n".join(lines))
+        await self._reply(
+            message,
+            embed=info_embed(
+                f"Warnings for {member.display_name}",
+                f"{active} active warning(s)\n\n" + "\n".join(lines),
+            ),
+        )
 
     async def _run_clearwarnings(self, message: discord.Message, parsed: ParsedCommand) -> None:
-        """Mark every active warning of a member as cleared (history kept)."""
         await self._require_view_permissions(message, ACTION_WARN)
         member = await self._resolve_member(message, parsed.arguments)
         case_service = self.bot.case_service
@@ -526,9 +771,11 @@ class PrefixDispatcher:
                 break
             page_number += 1
         if cleared == 0:
-            await self._reply(message, f"{member.mention} has no warnings to clear.")
+            await self._reply(
+                message,
+                embed=info_embed("No Warnings", f"{member.mention} has no warnings to clear."),
+            )
             return
-        # Structured moderation log (auditable), best-effort like all posts.
         await self.bot.moderation_service.post_event(
             message.guild,
             title="Warnings cleared",
@@ -538,10 +785,15 @@ class PrefixDispatcher:
                 ("Cleared", str(cleared)),
             ],
         )
-        await self._reply(message, f"Cleared {cleared} warning(s) for {member.mention}.")
+        await self._reply(
+            message,
+            embed=success_embed(
+                "Warnings Cleared",
+                f"Cleared {cleared} warning(s) for {member.mention}.",
+            ),
+        )
 
     async def _run_modhistory(self, message: discord.Message, parsed: ParsedCommand) -> None:
-        """Show a member's recent moderation cases (paginated)."""
         await self._require_view_permissions(message, ACTION_VIEW_CASES)
         rest = split_target_and_reason(parsed.arguments)[1]
         member = await self._resolve_member(message, parsed.arguments)
@@ -551,7 +803,10 @@ class PrefixDispatcher:
         case_service = self.bot.case_service
         result = case_service.list_for_member(message.guild.id, member.id, page=page, page_size=10)
         if not result.items:
-            await self._reply(message, f"No moderation cases found for {member.mention}.")
+            await self._reply(
+                message,
+                embed=info_embed("No Cases", f"No moderation cases found for {member.mention}."),
+            )
             return
         await self._reply(
             message,
@@ -565,13 +820,12 @@ class PrefixDispatcher:
     # ----------------------------------------------------- channel commands
 
     async def _run_purge(self, message: discord.Message, parsed: ParsedCommand) -> None:
-        """Bulk-delete up to ``amount`` messages in the current channel."""
         service: ModerationService = self.bot.moderation_service
         parts = parsed.arguments.strip().split(maxsplit=1)
         amount_text = parts[0] if parts else ""
         if not amount_text or not amount_text.isdigit():
             raise InvalidTargetError(
-                "Usage: `.purge <amount>` — provide a number of messages to delete."
+                "Usage: `·purge <amount>` — provide a number of messages to delete."
             )
         amount = int(amount_text)
         max_amount = service.max_purge_amount_for(message.guild)
@@ -582,21 +836,22 @@ class PrefixDispatcher:
         record = await service.purge(channel, message.author, validated)
         await self._reply(
             message,
-            format_moderation_reply(
-                record,
-                target_label=getattr(channel, "mention", "<channel>"),
-                moderator_label=message.author.mention,
+            embed=moderation_action_embed(
+                case_id=record.case_id,
+                action="purge",
+                target=getattr(channel, "mention", "<channel>"),
+                moderator=message.author.mention,
+                reason=record.reason,
+                status="Success",
             ),
         )
 
     async def _run_slowmode(self, message: discord.Message, parsed: ParsedCommand) -> None:
-        """Set the current channel's slowmode (0 clears it)."""
         service: ModerationService = self.bot.moderation_service
         duration_text = parsed.arguments.strip()
         if not duration_text:
             raise InvalidTargetError(
-                "Usage: `.slowmode <seconds>` — e.g. `.slowmode 10`, `.slowmode 5m`, "
-                "or `.slowmode 0` to clear."
+                "Usage: `·slowmode <seconds>` — e.g. `·slowmode 10` or `·slowmode 0` to clear."
             )
         cleaned = duration_text.lower()
         if cleaned in ("0", "0s"):
@@ -615,21 +870,26 @@ class PrefixDispatcher:
         )
         await self._reply(
             message,
-            format_moderation_reply(
-                record,
-                target_label=getattr(channel, "mention", "<channel>"),
-                moderator_label=message.author.mention,
+            embed=moderation_action_embed(
+                case_id=record.case_id,
+                action="slowmode",
+                target=getattr(channel, "mention", "<channel>"),
+                moderator=message.author.mention,
+                reason=record.reason,
+                status="Success",
             ),
         )
 
     async def _run_lockdown(self, message: discord.Message, parsed: ParsedCommand) -> None:
-        """Lock the current channel (idempotent; reversible via unlockdown)."""
         service: ModerationService = self.bot.moderation_service
         channel = message.channel
         if not hasattr(channel, "set_permissions"):
             raise InvalidTargetError("Lockdown only works in text channels.")
         if service.is_channel_locked(message.guild, channel):
-            await self._reply(message, "This channel is already locked.")
+            await self._reply(
+                message,
+                embed=info_embed("Already Locked", "This channel is already locked."),
+            )
             return
         record = await service.lock_channel(
             message.guild,
@@ -639,21 +899,26 @@ class PrefixDispatcher:
         )
         await self._reply(
             message,
-            format_moderation_reply(
-                record,
-                target_label=getattr(channel, "mention", "<channel>"),
-                moderator_label=message.author.mention,
+            embed=moderation_action_embed(
+                case_id=record.case_id,
+                action="lock",
+                target=getattr(channel, "mention", "<channel>"),
+                moderator=message.author.mention,
+                reason=record.reason,
+                status="Success",
             ),
         )
 
     async def _run_unlockdown(self, message: discord.Message, parsed: ParsedCommand) -> None:
-        """Unlock the current channel, restoring its pre-lock state."""
         service: ModerationService = self.bot.moderation_service
         channel = message.channel
         if not hasattr(channel, "set_permissions"):
             raise InvalidTargetError("Unlock only works in text channels.")
         if not service.is_channel_locked(message.guild, channel):
-            await self._reply(message, "This channel isn't locked.")
+            await self._reply(
+                message,
+                embed=info_embed("Not Locked", "This channel isn't locked."),
+            )
             return
         record = await service.unlock_channel(
             message.guild,
@@ -663,10 +928,13 @@ class PrefixDispatcher:
         )
         await self._reply(
             message,
-            format_moderation_reply(
-                record,
-                target_label=getattr(channel, "mention", "<channel>"),
-                moderator_label=message.author.mention,
+            embed=moderation_action_embed(
+                case_id=record.case_id,
+                action="unlock",
+                target=getattr(channel, "mention", "<channel>"),
+                moderator=message.author.mention,
+                reason=record.reason,
+                status="Success",
             ),
         )
 
@@ -674,21 +942,29 @@ class PrefixDispatcher:
 
     @staticmethod
     def _default_reason(arguments: str) -> str:
-        """Documented default reason when a command allows omitting one."""
         cleaned = arguments.strip()
         return cleaned or "No reason provided"
 
     def _member_label(self, guild: Any, user_id: int) -> str:
-        """Best-effort mention for a user ID (never a stored username)."""
         member = guild.get_member(user_id) if getattr(guild, "get_member", None) else None
         if member is not None:
             return getattr(member, "mention", f"<@{user_id}>")
         return f"<@{user_id}>"
 
-    async def _reply(self, message: discord.Message, content: str) -> None:
+    async def _reply(
+        self,
+        message: discord.Message,
+        content: str | None = None,
+        embed: discord.Embed | None = None,
+    ) -> None:
         try:
-            await message.channel.send(content)
-        except Exception:  # noqa: BLE001 - replying must never crash the bot
+            kwargs: dict[str, Any] = {}
+            if content:
+                kwargs["content"] = content
+            if embed:
+                kwargs["embed"] = embed
+            await message.channel.send(**kwargs)
+        except Exception:  # noqa: BLE001
             logger.warning(
                 "could not reply to prefix command: guild=%s channel=%s",
                 message.guild.id,
@@ -696,15 +972,7 @@ class PrefixDispatcher:
             )
 
 
-def _warning_status_label(record: Any) -> str:
-    """Short status label for a warning case (Success/Cleared/Failed)."""
-    if record.status == STATUS_CLEARED:
-        return "Cleared"
-    return "Success" if record.success else "Failed"
-
-
 def _truncate_reason(reason: str | None) -> str:
-    """Truncate a reason for list views so messages stay bounded."""
     text = (reason or "—").strip()
     if len(text) <= 60:
         return text
@@ -712,7 +980,6 @@ def _truncate_reason(reason: str | None) -> str:
 
 
 def _split_duration_and_reason(arguments: str) -> tuple[str, str]:
-    """Split ``arguments`` into ``(duration_text, reason)`` after the mention."""
     _target, rest = split_target_and_reason(arguments)
     parts = rest.split(maxsplit=1)
     if not parts:

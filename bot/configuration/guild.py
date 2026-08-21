@@ -127,7 +127,11 @@ class GuildConfig:
     #: Per-guild override for the text-command prefix (Phase 10). Seeded from
     #: the global environment prefix; administrators change it via
     #: ``/config prefix`` and the prefix dispatcher honors it per guild.
-    command_prefix: str = "."
+    command_prefix: str = "·"
+    #: Jail system: the role ID applied to jailed users (None = not configured).
+    jail_role_id: int | None = None
+    #: Jail system: the channel ID jailed users can access (None = unrestricted).
+    jail_channel_id: int | None = None
 
     # ---------------------------------------------------------- persistence
 
@@ -216,6 +220,8 @@ def default_guild_config(settings: Settings, guild_id: int) -> GuildConfig:
         raid_window_seconds=automod.raid_window_seconds,
         raid_action=automod.raid_action,
         command_prefix=settings.command_prefix,
+        jail_role_id=None,
+        jail_channel_id=None,
     )
 
 
@@ -412,6 +418,8 @@ _VALIDATORS: dict[str, Any] = {
     ),
     "raid_action": lambda v: _require_action("raid_action", v, _DETECTOR_ACTIONS["raid"]),
     "command_prefix": lambda v: _require_prefix("command_prefix", v),
+    "jail_role_id": lambda v: _require_optional_snowflake("jail_role_id", v),
+    "jail_channel_id": lambda v: _require_optional_snowflake("jail_channel_id", v),
 }
 
 

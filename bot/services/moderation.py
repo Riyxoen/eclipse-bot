@@ -272,6 +272,32 @@ class ModerationService:
 
         return _check
 
+    async def untimeout(
+        self,
+        guild: discord.Guild,
+        moderator: discord.Member,
+        target: discord.Member,
+        reason: str,
+    ) -> CaseRecord:
+        """Remove a member's timeout (untimeout prefix command).
+
+        Uses the same pipeline as unmute but creates an untimeout case
+        for clarity. Refuses when the target is not currently timed out.
+        """
+
+        async def _execute() -> None:
+            await target.timeout(None, reason=reason)
+
+        return await self._punish(
+            ACTION_UNMUTE,  # uses unmute action for case consistency
+            guild,
+            moderator,
+            target,
+            reason=reason,
+            execute=_execute,
+            state_check=self._require_timed_out(target),
+        )
+
     async def delete_message(
         self,
         guild: discord.Guild,

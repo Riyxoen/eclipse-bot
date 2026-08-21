@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Privacy Policy - Eclipse</title>
+    <style>
+        :root {
+            --primary: #5865F2;
+            --background: #0d1117;
+            --surface: #161b22;
+            --text: #e6edf3;
+            --muted: #8b949e;
+            --border: #30363d;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--background);
+            color: var(--text);
+            line-height: 1.7;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        header {
+            padding: 2rem 0;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 2rem;
+        }
+        nav {
+            margin-bottom: 1rem;
+        }
+        nav a {
+            color: var(--primary);
+            text-decoration: none;
+            font-size: 0.9rem;
+        }
+        nav a:hover {
+            text-decoration: underline;
+        }
+        h1 {
+            font-size: 2rem;
+            margin-bottom: 0.5rem;
+        }
+        .date {
+            color: var(--muted);
+            font-size: 0.9rem;
+        }
+        main {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 2rem;
+        }
+        h2 {
+            font-size: 1.3rem;
+            margin-top: 2rem;
+            margin-bottom: 1rem;
+            color: var(--primary);
+        }
+        h2:first-child {
+            margin-top: 0;
+        }
+        h3 {
+            font-size: 1.1rem;
+            margin-top: 1.5rem;
+            margin-bottom: 0.75rem;
+        }
+        p {
+            margin-bottom: 1rem;
+            color: var(--text);
+        }
+        ul, ol {
+            margin-bottom: 1rem;
+            padding-left: 1.5rem;
+        }
+        li {
+            margin-bottom: 0.5rem;
+        }
+        strong {
+            color: var(--text);
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 1rem;
+        }
+        th, td {
+            text-align: left;
+            padding: 0.75rem;
+            border: 1px solid var(--border);
+        }
+        th {
+            background: var(--background);
+        }
+        a {
+            color: var(--primary);
+            text-decoration: none;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+        footer {
+            text-align: center;
+            padding: 2rem 0;
+            margin-top: 2rem;
+            border-top: 1px solid var(--border);
+            color: var(--muted);
+            font-size: 0.85rem;
+        }
+        footer a {
+            color: var(--primary);
+            text-decoration: none;
+        }
+        @media (max-width: 600px) {
+            .container { padding: 1rem; }
+            h1 { font-size: 1.5rem; }
+            main { padding: 1.5rem; }
+            table { font-size: 0.9rem; }
+            th, td { padding: 0.5rem; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <nav><a href="index.html">&larr; Back to Home</a></nav>
+            <h1>Privacy Policy</h1>
+            <p class="date">Last updated: August 20, 2024</p>
+        </header>
+
+        <main>
+            <h2>1. Overview</h2>
+            <p>Eclipse is a Discord moderation bot that operates within Discord servers. This Privacy Policy explains what information Eclipse processes, how it is used, and how it is stored.</p>
+
+            <h2>2. Information Processed</h2>
+            <p>Eclipse processes the following information to provide its features:</p>
+
+            <h3>2.1 Discord User Information</h3>
+            <ul>
+                <li>User IDs (for identification in moderation cases and configuration)</li>
+                <li>User display names and nicknames (for AFK system and display purposes)</li>
+                <li>Member roles (for permission checks and jail system role preservation)</li>
+            </ul>
+
+            <h3>2.2 Server Information</h3>
+            <ul>
+                <li>Guild (server) IDs (for per-server configuration)</li>
+                <li>Channel IDs (for log channels and jail channels)</li>
+                <li>Role IDs (for moderator roles, administrator roles, and jail roles)</li>
+            </ul>
+
+            <h3>2.3 Message Content</h3>
+            <p>When automated moderation is enabled, Eclipse processes message content in real-time to detect:</p>
+            <ul>
+                <li>Spam messages</li>
+                <li>Duplicate messages</li>
+                <li>Excessive mentions</li>
+                <li>Blocked words or terms</li>
+                <li>Disallowed links or invites</li>
+            </ul>
+            <p><strong>Message content is not stored or persisted.</strong> It is only analyzed in real-time and then discarded.</p>
+
+            <h2>3. Information Stored</h2>
+            <p>Eclipse stores information in a local SQLite database on the server where it is hosted:</p>
+
+            <table>
+                <thead>
+                    <tr>
+                        <th>Data Type</th>
+                        <th>What is Stored</th>
+                        <th>Purpose</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Moderation Cases</td>
+                        <td>User IDs, moderator IDs, action taken, reason, timestamp, status</td>
+                        <td>Audit trail for moderation actions</td>
+                    </tr>
+                    <tr>
+                        <td>Guild Configuration</td>
+                        <td>Server settings (thresholds, roles, channels, blocked terms)</td>
+                        <td>Per-server customization</td>
+                    </tr>
+                    <tr>
+                        <td>AFK State</td>
+                        <td>User ID, original nickname, AFK message, timestamp</td>
+                        <td>AFK system functionality</td>
+                    </tr>
+                    <tr>
+                        <td>Jail Metadata</td>
+                        <td>Previous role IDs (stored in case metadata)</td>
+                        <td>Role restoration when unjailing</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3>3.1 What is NOT Stored</h3>
+            <ul>
+                <li>Message content (processed in real-time only)</li>
+                <li>User email addresses</li>
+                <li>IP addresses</li>
+                <li>Private tokens or credentials</li>
+                <li>User personal information beyond Discord IDs</li>
+            </ul>
+
+            <h2>4. How Information is Used</h2>
+            <p>Eclipse uses the stored information solely to:</p>
+            <ul>
+                <li>Execute moderation commands issued by authorized moderators</li>
+                <li>Apply automated moderation rules configured by server administrators</li>
+                <li>Maintain an audit trail of moderation actions</li>
+                <li>Provide per-server configuration and customization</li>
+                <li>Manage the AFK and jail systems</li>
+            </ul>
+
+            <h2>5. Discord's Role</h2>
+            <p>Eclipse operates through Discord's API and is subject to Discord's <a href="https://discord.com/terms" target="_blank" rel="noopener">Terms of Service</a> and <a href="https://discord.com/privacy" target="_blank" rel="noopener">Privacy Policy</a>. Discord provides the platform and handles its own data collection and processing.</p>
+
+            <h2>6. Third-Party Services</h2>
+            <p>Eclipse does not transmit data to any third parties beyond Discord. All data processing and storage occurs on the local server where Eclipse is hosted.</p>
+
+            <h2>7. Data Retention</h2>
+            <p>Data is retained as follows:</p>
+            <ul>
+                <li><strong>Moderation cases:</strong> Retained indefinitely until manually deleted by server administrators</li>
+                <li><strong>Guild configuration:</strong> Retained while Eclipse is in the server</li>
+                <li><strong>AFK state:</strong> Cleared when a user sends a message or when they are manually removed from AFK state</li>
+            </ul>
+            <p>There is no automatic data deletion mechanism. Data persists until the bot is removed from the server or the database is manually cleared by the server host.</p>
+
+            <h2>8. Data Deletion</h2>
+            <p>To remove data associated with your server:</p>
+            <ul>
+                <li>Remove Eclipse from your Discord server</li>
+                <li>Contact the server host to delete the Eclipse database file</li>
+            </ul>
+            <p>Eclipse does not provide a user-facing data deletion mechanism. Server administrators control the database and can delete it at any time.</p>
+
+            <h2>9. Security Practices</h2>
+            <p>Eclipse implements the following security measures:</p>
+            <ul>
+                <li>Bot tokens and credentials are stored in environment variables, never in code</li>
+                <li>The <code>.env</code> file containing sensitive configuration is excluded from version control</li>
+                <li>Database access is local only (no remote database connections)</li>
+                <li>Input validation is performed on all configuration values</li>
+                <li>SQL queries use parameterized statements to prevent injection attacks</li>
+            </ul>
+
+            <h2>10. Children's Privacy</h2>
+            <p>Eclipse does not knowingly collect personal information from children under 13. As a Discord bot, Eclipse operates within Discord's platform, which itself requires users to be at least 13 years old (or the minimum age in their country). Eclipse does not collect any information beyond what is necessary for its moderation functionality.</p>
+
+            <h2>11. Changes to This Policy</h2>
+            <p>We may update this Privacy Policy from time to time. Changes will be reflected by the "Last updated" date at the top of this page.</p>
+
+            <h2>12. Contact</h2>
+            <p>For questions about this Privacy Policy, please contact us through our support server:https://discord.gg/9FxaKWN5P</p>
+            <p><a href="https://github.com/Riyxoen/eclipse-bot/issues">GitHub Issues</a></p>
+            <p><em><!-- TODO: Replace with your preferred contact method --></em></p>
+        </main>
+    </div>
+
+    <footer>
+        <p>&copy; 2024 Eclipse. Built for Discord.</p>
+        <p><a href="terms.html">Terms of Service</a></p>
+    </footer>
+</body>
+</html>

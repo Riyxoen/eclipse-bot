@@ -150,6 +150,20 @@ class FakeMember(FakeUser):
             raise self._send_error
         self.sent.append(content)
 
+    async def edit(self, **kwargs: Any) -> None:
+        if "nick" in kwargs:
+            self.name = kwargs["nick"] or self.name
+
+    async def add_roles(self, *roles: Any, reason: str | None = None) -> None:
+        for role in roles:
+            if role not in self.roles:
+                self.roles.append(role)
+
+    async def remove_roles(self, *roles: Any, reason: str | None = None) -> None:
+        for role in roles:
+            if role in self.roles:
+                self.roles.remove(role)
+
 
 class FakeGuild:
     def __init__(
@@ -214,6 +228,12 @@ class FakeGuild:
 
     def get_channel(self, channel_id: int) -> FakeChannel | None:
         return next((channel for channel in self.channels if channel.id == channel_id), None)
+
+    async def create_text_channel(self, name: str, **kwargs: Any) -> FakeChannel:
+        channel_id = 1000 + len(self.channels)
+        channel = FakeChannel(channel_id, name, guild=self)
+        self.channels.append(channel)
+        return channel
 
     def fail_unban(self, error: Exception) -> None:
         self._unban_error = error

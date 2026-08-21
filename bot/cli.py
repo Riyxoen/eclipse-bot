@@ -21,7 +21,7 @@ logger = logging.getLogger("riyxoen.cli")
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="riyxoen",
-        description="Riyxoen Moderation Bot",
+        description="Eclipse Moderation Bot",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument(
@@ -62,6 +62,6 @@ def main(argv: list[str] | None = None) -> int:
         log_file=settings.log_file,
         secrets=(settings.token,),
     )
-    logger.info("bot starting (riyxoen v%s)", __version__)
+    logger.info("bot starting (eclipse v%s)", __version__)
     logger.info("configuration loaded")
     return asyncio.run(run(settings))

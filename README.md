@@ -10,8 +10,10 @@ Eclipse provides a full moderation toolkit: slash commands, text commands, an op
 - **Case history** — every moderation action creates a permanent, guild-isolated case record (`/case`, `/cases`, `/moderation-history`)
 - **Automated moderation** — opt-in engine with spam, duplicate, mention, link, invite, word-filter, and raid-protection detectors (each configurable per guild)
 - **Per-guild configuration** — `/config` and `/automod` commands let administrators tune thresholds, exemptions, and actions without restarting
-- **Custom roles** — `.el enable`, `.el rename`, `.el color` for a bot-managed role
-- **Text commands** — `.warn`, `.ban`, `.kick`, `.mute`, `.unmute`, `.purge`, `.slowmode`, `.lockdown`, `.unlockdown`, `.help` with a configurable prefix
+- **Custom roles** — `·cr enable`, `·cr rename`, `·cr color` for a bot-managed role
+- **AFK system** — `·afk [message]` to set AFK status with automatic nickname change and mention notifications
+- **Jail system** — `·jail setup`, `·jail @user`, `·unjail @user` with full role preservation
+- **Text commands** — `·warn`, `·ban`, `·kick`, `·mute`, `·unmute`, `·untimeout`, `·purge`, `·slowmode`, `·lockdown`, `·unlockdown`, `·afk`, `·jail`, `·unjail`, `·help` with a configurable prefix (default `·`)
 
 ## Requirements
 
@@ -86,7 +88,7 @@ All settings come from environment variables (or `.env`). These seed every guild
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `RIYXOEN_ENABLE_MESSAGE_CONTENT_INTENT` | `1` | Enable the privileged message-content intent (required for prefix commands and automod; must also be enabled in the developer portal) |
-| `RIYXOEN_COMMAND_PREFIX` | `.` | Prefix for text commands (e.g. `.ban`, `.kick`). 1–3 non-space characters |
+| `RIYXOEN_COMMAND_PREFIX` | `·` | Prefix for text commands (e.g. `·ban`, `·kick`). 1–3 non-space characters |
 
 ### Moderation
 
@@ -177,27 +179,40 @@ Reasons are **optional** in slash commands and default to "No reason provided".
 
 ### Text Commands
 
-Text commands use a configurable prefix (default `.`). Require the message-content intent.
+Text commands use a configurable prefix (default `·`). Require the message-content intent.
 
 | Command | Description |
 | --- | --- |
-| `.el enable` | Enable the custom-role system for this server |
-| `.el rename <name>` | Rename the managed role |
-| `.el color <hex>` | Set the managed role's color (e.g. `.el color #5865f2`) |
-| `.warn @user <reason>` | Warn a member (reason required) |
-| `.warnings @user` | Show a member's active warning count |
-| `.clearwarnings @user` | Clear a member's active warnings |
-| `.modhistory @user [page]` | Show a member's moderation cases |
-| `.purge <amount>` | Bulk-delete recent messages |
-| `.slowmode <seconds>` | Set channel slowmode (`0` clears; max 6 hours) |
-| `.lockdown` / `.unlockdown` | Lock / unlock the current channel |
-| `.ban @user <reason>` | Ban a member (reason required) |
-| `.kick @user <reason>` | Kick a member (reason required) |
-| `.mute @user <duration> <reason>` | Mute via Discord timeout (e.g. `10m`, `1h`, `2h`, `1d`) |
-| `.unmute @user <reason>` | Remove a timeout |
-| `.help` | Show organized command help by category |
+| `·cr enable` | Enable the custom-role system for this server |
+| `·cr rename <name>` | Rename the managed role |
+| `·cr color <hex>` | Set the managed role's color (e.g. `·cr color #5865f2`) |
+| `·warn @user <reason>` | Warn a member (reason required) |
+| `·warnings @user` | Show a member's active warning count |
+| `·clearwarnings @user` | Clear a member's active warnings |
+| `·modhistory @user [page]` | Show a member's moderation cases |
+| `·purge <amount>` | Bulk-delete recent messages |
+| `·slowmode <seconds>` | Set channel slowmode (`0` clears; max 6 hours) |
+| `·lockdown` / `·unlockdown` | Lock / unlock the current channel |
+| `·ban @user <reason>` | Ban a member (reason required) |
+| `·kick @user <reason>` | Kick a member (reason required) |
+| `·mute @user <duration> <reason>` | Mute via Discord timeout (e.g. `10m`, `1h`, `2h`, `1d`) |
+| `·unmute @user <reason>` | Remove a timeout |
+| `·untimeout @user [reason]` | Remove a Discord timeout |
+| `·afk [message]` | Set AFK status (auto-removed on next message) |
+| `·jail setup` | Configure the jail system (admin only) |
+| `·jail @user [reason]` | Jail a member (admin only) |
+| `·unjail @user` | Release a member from jail (admin only) |
+| `·help` | Show organized command help by category |
 
-Reasons are **required** for `.warn`, `.ban`, `.kick`, `.mute`, `.unmute`. All reasons are capped at 300 characters. If a DM to a punished user cannot be delivered, the action still succeeds and the moderator sees a note.
+Reasons are **required** for `·warn`, `·ban`, `·kick`, `·mute`, `·unmute`. All reasons are capped at 300 characters. If a DM to a punished user cannot be delivered, the action still succeeds and the moderator sees a note.
+
+### AFK System
+
+When a user sends `·afk [message]`, their nickname changes to `AFK | <name>` and the original name is preserved. When they send another message, AFK is automatically removed. If another user mentions an AFK user, a notification is sent. AFK state persists through bot restarts.
+
+### Jail System
+
+Administrators configure the jail with `·jail setup`, which creates a jail role and channel. When `·jail @user` is used, the user's previous roles are saved, roles are stripped, and the jail role is applied. `·unjail @user` restores previous roles (deleted roles are skipped safely). Every jail/unjail action creates a moderation case for full audit trail.
 
 ## Automated Moderation
 
@@ -299,6 +314,11 @@ To test with a real Discord server (private test recommended):
 4. Test guild isolation: run `/case 1` from a different server — should return "Case not found."
 5. Verify persistence: restart the bot and confirm `/case` still shows the record
 6. Test permissions: have a non-moderator try `/warn` — should be denied
+
+## Legal
+
+- [Terms of Service](https://riyxoen.github.io/eclipse-bot/terms.html)
+- [Privacy Policy](https://riyxoen.github.io/eclipse-bot/privacy.html)
 
 ## Architecture
 

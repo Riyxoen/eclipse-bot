@@ -148,3 +148,24 @@ class NotTimedOutError(ModerationError):
     """The target is not currently muted/timed out (unmute)."""
 
     user_message = "That user isn't currently muted."
+
+
+class JailNotConfiguredError(ModerationError):
+    """The jail system is not configured for this guild."""
+
+    user_message = (
+        "The jail system is not configured in this server. "
+        "An administrator must run `·jail setup` first."
+    )
+
+
+class AlreadyJailedError(ModerationError):
+    """The target is already jailed."""
+
+    user_message = "That user is already jailed."
+
+
+class NotJailedError(ModerationError):
+    """The target is not currently jailed."""
+
+    user_message = "That user isn't currently jailed."

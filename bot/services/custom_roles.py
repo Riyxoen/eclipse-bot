@@ -49,7 +49,7 @@ from bot.services.guild_config import GuildConfigService
 logger = logging.getLogger("riyxoen.custom_roles")
 
 #: Default name for the bot-managed custom role (created by ``.el enable``).
-DEFAULT_ROLE_NAME = "Riyxoen Custom"
+DEFAULT_ROLE_NAME = "Eclipse Custom"
 
 #: Default color for the bot-managed custom role (Blurple; created by
 #: ``.el enable`` when the role does not exist yet).

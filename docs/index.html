@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Eclipse - Discord Moderation Bot</title>
+    <style>
+        :root {
+            --primary: #5865F2;
+            --background: #0d1117;
+            --surface: #161b22;
+            --text: #e6edf3;
+            --muted: #8b949e;
+            --border: #30363d;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--background);
+            color: var(--text);
+            line-height: 1.6;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        header {
+            text-align: center;
+            padding: 3rem 0;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 3rem;
+        }
+        h1 {
+            font-size: 2.5rem;
+            margin-bottom: 0.5rem;
+            color: var(--primary);
+        }
+        .subtitle {
+            color: var(--muted);
+            font-size: 1.1rem;
+        }
+        .content {
+            display: grid;
+            gap: 1.5rem;
+        }
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.5rem;
+            text-decoration: none;
+            color: var(--text);
+            transition: border-color 0.2s, transform 0.2s;
+        }
+        .card:hover {
+            border-color: var(--primary);
+            transform: translateY(-2px);
+        }
+        .card h2 {
+            font-size: 1.25rem;
+            margin-bottom: 0.5rem;
+        }
+        .card p {
+            color: var(--muted);
+            font-size: 0.9rem;
+        }
+        footer {
+            text-align: center;
+            padding: 2rem 0;
+            margin-top: 3rem;
+            border-top: 1px solid var(--border);
+            color: var(--muted);
+            font-size: 0.85rem;
+        }
+        footer a {
+            color: var(--primary);
+            text-decoration: none;
+        }
+        footer a:hover {
+            text-decoration: underline;
+        }
+        @media (max-width: 600px) {
+            .container { padding: 1rem; }
+            h1 { font-size: 2rem; }
+            header { padding: 2rem 0; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Eclipse</h1>
+            <p class="subtitle">Discord Moderation Bot</p>
+        </header>
+
+        <main class="content">
+            <a href="terms.html" class="card">
+                <h2>Terms of Service</h2>
+                <p>Review the terms governing your use of Eclipse.</p>
+            </a>
+
+            <a href="privacy.html" class="card">
+                <h2>Privacy Policy</h2>
+                <p>Learn how Eclipse handles your data and respects your privacy.</p>
+            </a>
+        </main>
+
+        <footer>
+            <p>&copy; 2024 Eclipse. Built for Discord.</p>
+            <p>
+                <a href="https://github.com/Riyxoen/eclipse-bot">GitHub</a>
+            </p>
+        </footer>
+    </div>
+</body>
+</html>

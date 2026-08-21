@@ -684,7 +684,7 @@ async def test_prefix_rejects_invalid_values() -> None:
     prefix = _command(world["cog"], "prefix")
     await prefix.callback(world["cog"], interaction, prefix="!!!!")
     assert "can't be longer than 3" in interaction.response.messages[0]
-    assert world["config_service"].get(guild.id).command_prefix == "."  # unchanged
+    assert world["config_service"].get(guild.id).command_prefix == "·"  # unchanged
 
     interaction.response.messages.clear()
     await prefix.callback(world["cog"], interaction, prefix="a b")
@@ -703,7 +703,7 @@ async def test_prefix_requires_administrator() -> None:
     await _command(world["cog"], "prefix").callback(world["cog"], interaction, prefix="!")
 
     assert "Administrator" in interaction.response.messages[0]
-    assert world["config_service"].get(guild.id).command_prefix == "."
+    assert world["config_service"].get(guild.id).command_prefix == "·"
 
 
 # -------------------------------------------------------- log channel announce

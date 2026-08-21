@@ -19,6 +19,8 @@ from bot.database.config_repository import (
     build_guild_config_repository,
 )
 from bot.database.repository import MemoryCaseRepository, build_case_repository
+from bot.services.afk import AfkService
+from bot.services.jail import JailService
 
 logger = logging.getLogger("riyxoen.bot")
 
@@ -98,11 +100,13 @@ class RiyxoenBot(discord.Client):
         )
         # Confirmation state machine for dangerous actions (Phase 6).
         self.confirmation_service = ConfirmationController()
-        # Custom-role system (Phase 6, ``.el`` prefix commands) — enabled
-        # state and the managed role ID live in the per-guild config.
+        # Custom-role system — enabled state and the managed role ID live in the per-guild config.
         self.custom_roles = CustomRoleService(self.settings, self.permissions, self.config_service)
-        # Prefix (text) commands: ``.el``, ``.ban``, ``.kick``, ``.mute``,
-        # ``.unmute``. Requires the message-content intent (on by default).
+        # AFK system — persists through restarts via the database.
+        self.afk_service = AfkService(self.settings.database_path)
+        # Jail system — manages jail role, channel, and role preservation.
+        self.jail_service = JailService(self.permissions, self.config_service)
+        # Prefix (text) commands. Requires the message-content intent (on by default).
         self.prefix = PrefixDispatcher(self, self.settings)
         self.automod = AutomodEngine(
             self.settings,

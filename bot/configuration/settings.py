@@ -30,7 +30,7 @@ class Settings:
     #: rejects the connection (see ``bot.core.intents.build_intents``).
     enable_message_content_intent: bool = True
     #: Prefix for the legacy text commands (``.el``, ``.ban``, ...).
-    command_prefix: str = "."
+    command_prefix: str = "·"
     #: Discord role IDs that grant full moderation access (any command).
     moderator_role_ids: tuple[int, ...] = ()
     #: Optional Discord channel that receives a case summary per action.
