@@ -245,6 +245,11 @@ class PrefixDispatcher:
             guild_id, prefix, starts_with_prefix,
         )
 
+        logger.info(
+            "PREFIX DEBUG: guild=%s resolved_prefix=%r starts_with_prefix=%s",
+            guild_id, prefix, starts_with_prefix,
+        )
+
         parsed = parse_prefix_command(message.content, prefix)
         if parsed is None:
             logger.debug(
