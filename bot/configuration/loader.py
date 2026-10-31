@@ -7,6 +7,8 @@ from pathlib import Path
 
 from bot.configuration.automod import load_automod_settings
 from bot.configuration.env import TOKEN_ENV_VAR, getenv, load_env_file
+from bot.configuration.parsing import parse_bool, parse_snowflake_list
+from bot.configuration.prefix import validate_command_prefix
 from bot.configuration.settings import Settings
 from bot.core.errors import ConfigError
 
@@ -28,26 +30,6 @@ ENV_COMMAND_PREFIX = "RIYXOEN_COMMAND_PREFIX"
 #: Upper bound accepted for RIYXOEN_MAX_PURGE_AMOUNT (sanity ceiling; the
 #: per-command maximum is whatever the operator configures below this).
 MAX_PURGE_AMOUNT_CEILING = 1000
-
-
-def _parse_snowflake_list(name: str, raw: str | None, errors: list[str]) -> tuple[int, ...]:
-    """Parse a comma-separated list of snowflake IDs (roles), or ``()``."""
-    if raw is None or not raw.strip():
-        return ()
-    ids: list[int] = []
-    for part in raw.split(","):
-        token = part.strip()
-        if not token:
-            continue
-        if not token.isdigit():
-            errors.append(f"{name} must be a comma-separated list of IDs; got {token!r}.")
-            continue
-        value = int(token)
-        if value <= 0:
-            errors.append(f"{name} IDs must be positive; got {value!r}.")
-            continue
-        ids.append(value)
-    return tuple(ids)
 
 
 def _parse_optional_snowflake(name: str, raw: str | None, errors: list[str]) -> int | None:
@@ -88,23 +70,6 @@ _LOG_LEVELS: dict[str, int] = {
     "CRITICAL": logging.CRITICAL,
 }
 
-_TRUE_VALUES = {"1", "true", "yes", "on"}
-_FALSE_VALUES = {"0", "false", "no", "off"}
-
-
-def _parse_bool(name: str, raw: str | None, default: bool, errors: list[str]) -> bool:
-    """Parse a boolean environment value, recording an error when invalid."""
-    if raw is None:
-        return default
-    value = raw.strip().lower()
-    if value in _TRUE_VALUES:
-        return True
-    if value in _FALSE_VALUES:
-        return False
-    errors.append(f"{name} must be a boolean (1/0, true/false, yes/no, on/off); got {raw!r}")
-    return default
-
-
 def load_settings(env_file: Path | None = None) -> Settings:
     """Load and validate settings from the environment.
 
@@ -144,26 +109,25 @@ def load_settings(env_file: Path | None = None) -> Settings:
         except ValueError:
             errors.append(f"{ENV_SHUTDOWN_TIMEOUT} must be a number; got {raw_timeout!r}.")
 
-    enable_message_content = _parse_bool(
+    enable_message_content = parse_bool(
         ENV_ENABLE_MESSAGE_CONTENT, getenv(ENV_ENABLE_MESSAGE_CONTENT), True, errors
     )
 
     raw_prefix = getenv(ENV_COMMAND_PREFIX)
     command_prefix = "·"
     if raw_prefix is not None and raw_prefix.strip():
-        command_prefix = raw_prefix.strip()
-        if len(command_prefix) > 4 or command_prefix.isspace():
-            errors.append(
-                f"{ENV_COMMAND_PREFIX} must be 1-4 non-space characters; got {raw_prefix!r}."
-            )
+        try:
+            command_prefix = validate_command_prefix(raw_prefix)
+        except ValueError as exc:
+            errors.append(f"{ENV_COMMAND_PREFIX} {exc}; got {raw_prefix!r}.")
 
-    moderator_role_ids = _parse_snowflake_list(
+    moderator_role_ids = parse_snowflake_list(
         ENV_MODERATOR_ROLE_IDS, getenv(ENV_MODERATOR_ROLE_IDS), errors
     )
     log_channel_id = _parse_optional_snowflake(
         ENV_LOG_CHANNEL_ID, getenv(ENV_LOG_CHANNEL_ID), errors
     )
-    notify_users = _parse_bool(ENV_NOTIFY_USERS, getenv(ENV_NOTIFY_USERS), True, errors)
+    notify_users = parse_bool(ENV_NOTIFY_USERS, getenv(ENV_NOTIFY_USERS), True, errors)
 
     max_purge_amount = _parse_positive_int(
         ENV_MAX_PURGE_AMOUNT, getenv(ENV_MAX_PURGE_AMOUNT), 100, errors

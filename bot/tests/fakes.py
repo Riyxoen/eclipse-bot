@@ -86,13 +86,15 @@ class FakeUser:
         self.id = id
         self.name = name
         self.bot = bot
+        self.nick: str | None = None
 
     def __str__(self) -> str:
         return self.name
 
     @property
     def display_name(self) -> str:
-        return self.name
+        # Like Discord: the nickname overrides the (immutable) username.
+        return self.nick or self.name
 
     @property
     def mention(self) -> str:
@@ -116,6 +118,7 @@ class FakeMember(FakeUser):
         self.guild = guild
         self.guild_permissions = guild_permissions or FakePermissions()
         self.timed_out_until: datetime | None = None
+        self.nick: str | None = None
         self.kicked = False
         self.banned = False
         self.sent: list[str] = []
@@ -152,7 +155,9 @@ class FakeMember(FakeUser):
 
     async def edit(self, **kwargs: Any) -> None:
         if "nick" in kwargs:
-            self.name = kwargs["nick"] or self.name
+            # ``nick=None`` clears the nickname; the username itself never
+            # changes, only the nickname that overrides it.
+            self.nick = kwargs["nick"]
 
     async def add_roles(self, *roles: Any, reason: str | None = None) -> None:
         for role in roles:

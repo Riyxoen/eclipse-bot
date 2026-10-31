@@ -11,7 +11,7 @@ Eclipse provides a full moderation toolkit: slash commands, text commands, an op
 - **Automated moderation** — opt-in engine with spam, duplicate, mention, link, invite, word-filter, and raid-protection detectors (each configurable per guild)
 - **Per-guild configuration** — `/config` and `/automod` commands let administrators tune thresholds, exemptions, and actions without restarting
 - **Custom roles** — `·cr enable`, `·cr rename`, `·cr color` for a bot-managed role
-- **AFK system** — `·afk [message]` to set AFK status with automatic nickname change and mention notifications
+- **AFK system** — `/afk [reason]` or `·afk [reason]` tags your nickname `[AFK]`, answers mentions with your reason and how long you've been away, and clears itself when you next speak
 - **Jail system** — `·jail setup`, `·jail @user`, `·unjail @user` with full role preservation
 - **Text commands** — `·warn`, `·ban`, `·kick`, `·mute`, `·unmute`, `·untimeout`, `·purge`, `·slowmode`, `·lockdown`, `·unlockdown`, `·afk`, `·jail`, `·unjail`, `·help` with a configurable prefix (default `·`)
 
@@ -148,6 +148,7 @@ Automated moderation is **off by default**. Set `RIYXOEN_AUTOMOD_ENABLED=1` to e
 | Command | Description |
 | --- | --- |
 | `/ping` | Reply with gateway latency |
+| `/afk [reason]` | Mark yourself AFK (auto-cleared on your next message) |
 | `/help` | Show available commands |
 | `/health ping` | Health check |
 | `/warn <member> [reason]` | Warn a member (records a case, optionally DMs them) |
@@ -187,7 +188,7 @@ Text commands use a configurable prefix (default `·`). Require the message-cont
 | `·cr rename <name>` | Rename the managed role |
 | `·cr color <hex>` | Set the managed role's color (e.g. `·cr color #5865f2`) |
 | `·warn @user <reason>` | Warn a member (reason required) |
-| `·warnings @user` | Show a member's active warning count |
+| `·warnings @user` | Show a member's warnings with active/expired/cleared labels |
 | `·clearwarnings @user` | Clear a member's active warnings |
 | `·modhistory @user [page]` | Show a member's moderation cases |
 | `·purge <amount>` | Bulk-delete recent messages |
@@ -208,7 +209,7 @@ Reasons are **required** for `·warn`, `·ban`, `·kick`, `·mute`, `·unmute`. 
 
 ### AFK System
 
-When a user sends `·afk [message]`, their nickname changes to `AFK | <name>` and the original name is preserved. When they send another message, AFK is automatically removed. If another user mentions an AFK user, a notification is sent. AFK state persists through bot restarts.
+`/afk [reason]` (or `·afk [reason]`) marks you away and renames you to `[AFK] <name>`; the original name is stored so it can be restored exactly. While away, if another member mentions you the bot replies in the channel with your reason and how long ago you left. The moment you send another message in that server — including a command — the status is removed, your nickname is restored, and a short welcome-back message is posted. Running `/afk` again while away updates the reason instead of toggling the status. AFK state persists through bot restarts.
 
 ### Jail System
 
@@ -375,11 +376,11 @@ With `RIYXOEN_AUTOMOD_ENABLED=1`:
 
 ### Custom Roles & Prefix Commands
 
-1. Run `.el enable` as an admin — verify the managed role is created
-2. Run `.el rename` and `.el color` — verify the role updates
-3. Test `.ban`, `.kick`, `.mute`, `.unmute` with required reasons
-4. Test `.help` with different permission levels (admin, moderator, regular member)
-5. Change prefix with `/config prefix !` — verify `!warn` works and `.warn` does not
+1. Run `·cr enable` as an admin — verify the managed role is created
+2. Run `·cr rename` and `·cr color` — verify the role updates
+3. Test `·ban`, `·kick`, `·mute`, `·unmute` with required reasons
+4. Test `·help` with different permission levels (admin, moderator, regular member)
+5. Change prefix with `/config prefix !` — verify `!warn` works and `·warn` does not
 
 ## Cost
 

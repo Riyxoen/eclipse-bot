@@ -1110,41 +1110,46 @@ async def test_dot_afk_sets_afk_state() -> None:
         guild_permissions=FakePermissions(),
     )
     guild.members.append(user)
-    await _dispatch(world, _message(world, user, "·afk"))
+    await _dispatch(world, _message(world, user, "·afk studying"))
 
     replies = _replies(world)
     assert len(replies) > 0, "·afk should produce a response"
     text = "\n".join(replies)
     assert "AFK" in text
-    # Check that nickname was changed
-    assert user.display_name.startswith("AFK | ")
+    assert "studying" in text
+    # The nickname is tagged so the status is visible before anyone messages.
+    assert user.display_name == "[AFK] TestUser"
+    assert afk_service.get(guild.id, user.id) is not None
 
 
-async def test_dot_afk_disabled_after_message() -> None:
-    """·afk sets AFK; sending another message removes it."""
+async def test_dot_afk_cleared_when_the_afk_handler_sees_activity() -> None:
+    """A normal message is not a command; the AFK handler clears the status."""
     world = _world_dot_prefix()
     guild = world["guild"]
-    from bot.services.afk import AfkService
+    from bot.services.afk import AfkEventHandler, AfkService
 
     afk_service = AfkService()
     world["bot"].afk_service = afk_service
+    events = AfkEventHandler(afk_service, status_command=world["dispatcher"].is_afk_command)
 
     user = FakeMember(
         4, "TestUser", roles=[FakeRole(50, "user", 1)], guild=guild,
         guild_permissions=FakePermissions(),
     )
     guild.members.append(user)
-    # Set AFK
     await _dispatch(world, _message(world, user, "·afk"))
-    assert user.display_name.startswith("AFK | ")
+    assert user.display_name == "[AFK] TestUser"
 
-    # Send another message — AFK should be removed
     world["guild"].channels[0].sent_messages.clear()
     world["guild"].channels[0].sent_embeds.clear()
-    await _dispatch(world, _message(world, user, "·afk"))
-    replies = _replies(world)
-    text = "\n".join(replies)
-    assert "Welcome Back" in text or "welcome back" in text.lower()
+    message = _message(world, user, "back again")
+    assert await _dispatch(world, message) is False  # plain message, not a command
+    await events.handle_message(message)
+
+    assert afk_service.get(guild.id, user.id) is None
+    # No nickname before AFK, so it is cleared rather than pinned.
+    assert user.nick is None
+    assert "welcome back" in "\n".join(_replies(world)).lower()
 
 
 async def test_dot_cr_enable_with_dot_prefix() -> None:

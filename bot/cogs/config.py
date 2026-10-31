@@ -27,6 +27,7 @@ from typing import Any, Literal
 import discord
 from discord import app_commands
 
+from bot.cogs.admin import AdminCommandMixin
 from bot.configuration.display import format_config_view
 from bot.configuration.errors import GuildConfigError
 from bot.moderation.errors import ModerationError
@@ -47,7 +48,7 @@ def _parse_id(raw: str, name: str) -> int:
     return int(cleaned)
 
 
-class ConfigCog(app_commands.Group):
+class ConfigCog(AdminCommandMixin, app_commands.Group):
     """Server configuration commands. Commands call the service; no logic here."""
 
     # Nested subgroups (discord.py collects Group instances from the class
@@ -72,48 +73,6 @@ class ConfigCog(app_commands.Group):
         self.moderation_service = moderation_service
 
     # -------------------------------------------------------------- helpers
-
-    def _require_admin(self, interaction: discord.Interaction) -> None:
-        """Gate config behind the shared admin permission layer (server-side)."""
-        permissions = interaction.client.permissions
-        permissions.require_guild(interaction.guild)
-        permissions.require_administrator(interaction.user, interaction.guild)
-
-    async def _deny(
-        self, interaction: discord.Interaction, exc: ModerationError | GuildConfigError
-    ) -> None:
-        """Show a safe denial/validation message; detail is in the logs."""
-        logger.info("config denied: %s (user=%s)", exc.user_message, interaction.user.id)
-        await interaction.response.send_message(exc.user_message, ephemeral=True)
-
-    async def _apply(
-        self,
-        interaction: discord.Interaction,
-        changes: dict,
-        *,
-        summary: str,
-    ) -> None:
-        """Validate via the service, respond with old -> new, and announce."""
-        try:
-            self._require_admin(interaction)
-        except ModerationError as exc:
-            await self._deny(interaction, exc)
-            return
-        try:
-            previous = self.config_service.get(interaction.guild.id)
-            self.config_service.update(
-                interaction.guild.id,
-                actor_user_id=interaction.user.id,
-                changes=changes,
-            )
-        except GuildConfigError as exc:
-            await self._deny(interaction, exc)
-            return
-        lines = [f"Updated **{summary}**."]
-        for key, value in changes.items():
-            lines.append(f"- `{key}`: `{getattr(previous, key)}` → `{value}`")
-        await interaction.response.send_message("\n".join(lines), ephemeral=True)
-        await self._announce_change(interaction, summary, list(changes))
 
     async def _announce_change(
         self,

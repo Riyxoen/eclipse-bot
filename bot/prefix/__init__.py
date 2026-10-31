@@ -31,7 +31,6 @@ Safety:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 from collections import OrderedDict, deque
@@ -44,7 +43,7 @@ import discord
 
 from bot.configuration.settings import Settings
 from bot.moderation.actions import ACTION_VIEW_CASES, ACTION_WARN
-from bot.moderation.cases import STATUS_CLEARED, STATUS_SUCCESS, utc_now
+from bot.moderation.cases import STATUS_CLEARED, STATUS_SUCCESS, CaseRecord, utc_now
 from bot.moderation.errors import (
     InvalidTargetError,
     ModerationError,
@@ -55,6 +54,7 @@ from bot.moderation.validation import (
     validate_purge_amount,
     validate_slowmode_duration,
 )
+from bot.services.afk import build_afk_nickname, strip_afk_nickname
 from bot.services.custom_roles import CustomRoleService
 from bot.services.moderation import ModerationService
 from bot.utilities.embeds import (
@@ -75,6 +75,8 @@ PREFIX_COMMAND_LIMIT = 10
 PREFIX_COMMAND_WINDOW_SECONDS = 5
 #: Upper bound on tracked users (defense against unbounded growth).
 PREFIX_MAX_TRACKED_USERS = 10_000
+#: Upper bound on warning rows rendered by ``·warnings`` (bounded output).
+MAX_WARNING_ROWS = 50
 
 #: Matches a user mention like ``<@123456789012345678>`` (also handles the
 #: nickname form ``<@!...>`` which older clients emitted).
@@ -242,11 +244,6 @@ class PrefixDispatcher:
         starts_with_prefix = message.content.startswith(prefix)
         logger.debug(
             "prefix.handle: guild=%s prefix=%r starts_with=%s",
-            guild_id, prefix, starts_with_prefix,
-        )
-
-        logger.info(
-            "PREFIX DEBUG: guild=%s resolved_prefix=%r starts_with_prefix=%s",
             guild_id, prefix, starts_with_prefix,
         )
 
@@ -420,43 +417,58 @@ class PrefixDispatcher:
     # --------------------------------------------------------------- AFK
 
     async def _route_afk(self, message: discord.Message, parsed: ParsedCommand) -> None:
+        """``·afk [reason]`` — set or update the author's AFK status.
+
+        Removal is automatic: the author's next non-AFK message in this guild
+        clears the status, restores the nickname, and posts a welcome back
+        (see :class:`bot.services.afk.AfkEventHandler`).
+        """
         afk_service = getattr(self.bot, "afk_service", None)
         if afk_service is None:
-            await self._reply(message, embed=error_embed("Unavailable", "The AFK system is not available."))
+            await self._reply(
+                message, embed=error_embed("Unavailable", "The AFK system is not available.")
+            )
             return
 
         guild = message.guild
         author = message.author
-        state = afk_service.get(guild.id, author.id)
+        reason = parsed.arguments.strip() if parsed.arguments else ""
+        base_name = strip_afk_nickname(getattr(author, "display_name", author.name))
+        existing = afk_service.get(guild.id, author.id)
+        if existing is not None and not reason:
+            reason = existing.afk_message
 
-        # If already AFK, remove AFK state
-        if state is not None:
-            removed = afk_service.remove(guild.id, author.id)
-            if removed:
-                # Restore nickname
-                original_name = removed.original_name
-                display = getattr(author, "display_name", author.name)
-                if display.startswith("AFK | "):
-                    await afk_service.restore_nickname(author, original_name)
-            await self._reply(
-                message,
-                embed=success_embed("Welcome Back!", f"Welcome back, {author.mention}! Your AFK has been removed."),
-            )
-            return
-
-        # Set AFK state
-        display_name = getattr(author, "display_name", author.name)
-        afk_message = parsed.arguments.strip() if parsed.arguments else ""
-        afk_service.set_afk(guild.id, author.id, display_name, afk_message)
-
-        # Change nickname
-        afk_name = f"AFK | {display_name}"
-        await afk_service.apply_nickname(member=author, afk_name=afk_name)
+        afk_service.set_afk(guild.id, author.id, base_name, reason)
+        tagged = await afk_service.apply_nickname(
+            member=author, afk_name=build_afk_nickname(base_name)
+        )
 
         desc = f"{author.mention} is now AFK."
-        if afk_message:
-            desc += f"\n> {afk_message}"
-        await self._reply(message, embed=afk_embed("AFK", desc))
+        if reason:
+            desc += f"\n> {reason}"
+        if not tagged:
+            desc += (
+                "\n_I couldn't change your nickname — I may lack Manage Nicknames "
+                "or be lower in the role hierarchy._"
+            )
+        title = "AFK Updated" if existing is not None else "AFK"
+        await self._reply(message, embed=afk_embed(title, desc))
+
+    def is_afk_command(self, message: discord.Message) -> bool:
+        """Whether ``message`` is this bot's ``afk`` command (never raises).
+
+        Used by the AFK event handler to treat the command itself as status
+        management rather than as activity that clears the status.
+        """
+        try:
+            guild = getattr(message, "guild", None)
+            if guild is None or not getattr(message, "content", ""):
+                return False
+            parsed = parse_prefix_command(message.content, self._prefix_for(guild))
+            return parsed is not None and parsed.name == "afk"
+        except Exception:  # noqa: BLE001 - classification must never raise
+            logger.debug("could not classify an afk command", exc_info=True)
+            return False
 
     # --------------------------------------------------------------- jail
 
@@ -466,84 +478,73 @@ class PrefixDispatcher:
             await self._reply(message, embed=error_embed("Unavailable", "The jail system is not available."))
             return
 
-        subcommand = parsed.subcommand or ""
         prefix = self._prefix_for(message.guild)
 
-        if subcommand == "setup":
-            try:
-                await jail_service.setup(message.guild, message.author)
-                role = jail_service.get_jail_role(message.guild)
-                channel = jail_service.get_jail_channel(message.guild)
-                fields = []
-                if role:
-                    fields.append(("Jail Role", role.mention))
-                if channel:
-                    fields.append(("Jail Channel", channel.mention))
-                else:
-                    fields.append(("Jail Channel", "Not configured"))
-                await self._reply(
-                    message,
-                    embed=jail_embed(
-                        "Jail System Configured",
-                        "The jail system is now active.",
-                        fields=fields,
-                    ),
-                )
-            except ModerationError as exc:
-                await self._reply(message, embed=error_embed("Setup Failed", exc.user_message))
+        if parsed.subcommand == "setup":
+            await self._jail_setup(message, jail_service)
             return
 
-        if subcommand in ("jail", ""):
-            # ·jail @user [reason]
-            if not parsed.subcommand:
-                # It's ·jail @user [reason] (no subcommand, just target)
-                pass
-            else:
-                # subcommand was "jail" which is wrong
-                raise InvalidTargetError(
-                    f"Usage: `{prefix}jail @user [reason]` or `{prefix}jail setup`."
-                )
-
-        # Jail a user
         target_id_text, reason = split_target_and_reason(parsed.arguments)
         if target_id_text is None:
-            raise InvalidTargetError(f"Mention the user to jail, e.g. `{prefix}jail @user reason`.")
+            raise InvalidTargetError(
+                f"Usage: `{prefix}jail @user [reason]` or `{prefix}jail setup`."
+            )
         member = message.guild.get_member(int(target_id_text))
         if member is None:
             raise InvalidTargetError("User not found.")
 
-        if not reason:
-            reason = "No reason provided"
-
+        # All permission, target, hierarchy, and state checks run inside the
+        # moderation service, *before* any role is touched.
         try:
-            previous_role_ids = await jail_service.jail(
-                message.guild, message.author, member, reason
-            )
-            # Create a jail case
-            service: ModerationService = self.bot.moderation_service
-            record = await service._punish(
-                "jail",
+            record = await self.bot.moderation_service.jail(
                 message.guild,
                 message.author,
                 member,
-                reason=reason,
-                execute=lambda: asyncio.sleep(0),  # type: ignore[misc]  # no-op, jail already applied
-                metadata={"previous_role_ids": previous_role_ids},
-            )
-            await self._reply(
-                message,
-                embed=jail_embed(
-                    "User Jailed",
-                    fields=[
-                        ("Target", member.mention),
-                        ("Moderator", message.author.mention),
-                        ("Reason", reason),
-                        ("Case", f"#{record.case_id}"),
-                    ],
-                ),
+                reason or "No reason provided",
             )
         except ModerationError as exc:
             await self._reply(message, embed=error_embed("Jail Failed", exc.user_message))
+            return
+
+        previous_role_ids = (record.metadata or {}).get("previous_role_ids") or []
+        await self._reply(
+            message,
+            embed=jail_embed(
+                "User Jailed",
+                fields=[
+                    ("Target", member.mention),
+                    ("Moderator", message.author.mention),
+                    ("Reason", record.reason),
+                    ("Roles Removed", str(len(previous_role_ids))),
+                    ("Case", f"#{record.case_id}"),
+                ],
+            ),
+        )
+
+    async def _jail_setup(self, message: discord.Message, jail_service: Any) -> None:
+        """Create/attach the jail role and channel for this guild (admin only)."""
+        try:
+            await jail_service.setup(message.guild, message.author)
+        except ModerationError as exc:
+            await self._reply(message, embed=error_embed("Setup Failed", exc.user_message))
+            return
+
+        role = jail_service.get_jail_role(message.guild)
+        channel = jail_service.get_jail_channel(message.guild)
+        prefix = self._prefix_for(message.guild)
+        await self._reply(
+            message,
+            embed=jail_embed(
+                "Jail System Configured",
+                "The jail system is now active.",
+                fields=[
+                    ("Jail Role", role.mention if role else "Not configured"),
+                    ("Jail Channel", channel.mention if channel else "Not configured"),
+                    ("Jail a member", f"`{prefix}jail @user [reason]`"),
+                    ("Release", f"`{prefix}unjail @user`"),
+                ],
+            ),
+        )
 
     async def _route_unjail(self, message: discord.Message, parsed: ParsedCommand) -> None:
         jail_service = getattr(self.bot, "jail_service", None)
@@ -554,47 +555,40 @@ class PrefixDispatcher:
         prefix = self._prefix_for(message.guild)
         target_id_text, _reason = split_target_and_reason(parsed.arguments)
         if target_id_text is None:
-            raise InvalidTargetError(f"Mention the user to unjail, e.g. `{prefix}unjail @user`.")
+            raise InvalidTargetError(f"Usage: `{prefix}unjail @user`.")
         member = message.guild.get_member(int(target_id_text))
         if member is None:
             raise InvalidTargetError("User not found.")
 
-        # Find previous roles from the jail case
-        case_service = self.bot.case_service
-        jail_meta = jail_service.find_jail_case_metadata(
-            message.guild.id, member.id, case_service
-        )
-        previous_role_ids = (jail_meta or {}).get("previous_role_ids", [])
-
+        # The moderation service resolves the previous roles from the most
+        # recent jail case and performs every check before releasing anyone.
         try:
-            await jail_service.unjail(
-                message.guild, message.author, member, previous_role_ids
-            )
-            # Create an unjail case
-            service: ModerationService = self.bot.moderation_service
-            record = await service._punish(
-                "unjail",
+            record = await self.bot.moderation_service.unjail(
                 message.guild,
                 message.author,
                 member,
-                reason="Released from jail",
-                execute=lambda: asyncio.sleep(0),  # type: ignore[misc]
-                metadata={"previous_role_ids": previous_role_ids},
-            )
-            await self._reply(
-                message,
-                embed=success_embed(
-                    "User Unjailed",
-                    fields=[
-                        ("Target", member.mention),
-                        ("Moderator", message.author.mention),
-                        ("Roles Restored", str(len(previous_role_ids))),
-                        ("Case", f"#{record.case_id}"),
-                    ],
-                ),
+                "Released from jail",
             )
         except ModerationError as exc:
             await self._reply(message, embed=error_embed("Unjail Failed", exc.user_message))
+            return
+
+        metadata = record.metadata or {}
+        restored = metadata.get("restored_role_count")
+        if restored is None:
+            restored = len(metadata.get("previous_role_ids") or [])
+        await self._reply(
+            message,
+            embed=success_embed(
+                "User Unjailed",
+                fields=[
+                    ("Target", member.mention),
+                    ("Moderator", message.author.mention),
+                    ("Roles Restored", str(restored)),
+                    ("Case", f"#{record.case_id}"),
+                ],
+            ),
+        )
 
     # ---------------------------------------------------------- untimeout
 
@@ -763,12 +757,22 @@ class PrefixDispatcher:
         permissions.require_moderator(message.author, action)
 
     async def _run_warnings(self, message: discord.Message, parsed: ParsedCommand) -> None:
+        """Show a member's warnings using the configured expiry window.
+
+        The active count and every row's label follow the same rule as the
+        automated-moderation escalation policy: only successful warnings
+        created within ``warning_window_seconds`` count (``0`` = never
+        expire). All of the member's warnings are listed, not just the first
+        page.
+        """
         await self._require_view_permissions(message, ACTION_VIEW_CASES)
         member = await self._resolve_member(message, parsed.arguments)
-        case_service = self.bot.case_service
-        active = case_service.count_active_warnings(message.guild.id, member.id, since=None)
-        page = case_service.list_for_member(message.guild.id, member.id, page_size=10)
-        warnings = [record for record in page.items if record.action == "warn"]
+        guild_id = message.guild.id
+
+        window = self._warning_window_seconds(guild_id)
+        since = utc_now() - timedelta(seconds=window) if window else None
+        active = self.bot.case_service.count_active_warnings(guild_id, member.id, since)
+        warnings = self._collect_warnings(guild_id, member.id)
         if not warnings:
             await self._reply(
                 message,
@@ -776,20 +780,44 @@ class PrefixDispatcher:
             )
             return
 
-        lines = []
-        for record in warnings:
-            status = "Cleared" if record.status == STATUS_CLEARED else "Active"
-            lines.append(
-                f"`#{record.case_id}` {status} | "
-                f"{_truncate_reason(record.reason)} | {record.created_at:%Y-%m-%d}"
-            )
+        lines = [
+            f"`#{record.case_id}` {_warning_label(record, since)} | "
+            f"{_truncate_reason(record.reason)} | {record.created_at:%Y-%m-%d}"
+            for record in warnings
+        ]
+        summary = f"{active} active warning(s)"
+        summary += f" · window {window}s" if window else " · warnings never expire"
         await self._reply(
             message,
             embed=info_embed(
                 f"Warnings for {member.display_name}",
-                f"{active} active warning(s)\n\n" + "\n".join(lines),
+                f"{summary}\n\n" + "\n".join(lines),
             ),
         )
+
+    def _warning_window_seconds(self, guild_id: int) -> int:
+        """The guild's warning-expiration window (0 = warnings never expire)."""
+        config_service = getattr(self.bot, "config_service", None)
+        if config_service is not None:
+            try:
+                return int(config_service.get(guild_id).warning_window_seconds)
+            except Exception:  # noqa: BLE001 - a read aid must never fail the command
+                logger.exception("could not read the warning window for guild %s", guild_id)
+        return int(self.settings.automod.warning_window_seconds)
+
+    def _collect_warnings(self, guild_id: int, member_id: int) -> list[CaseRecord]:
+        """Every ``warn`` case for a member, across pages (bounded)."""
+        collected: list[CaseRecord] = []
+        page_number = 1
+        while len(collected) < MAX_WARNING_ROWS:
+            page = self.bot.case_service.list_for_member(
+                guild_id, member_id, page=page_number, page_size=50
+            )
+            collected.extend(record for record in page.items if record.action == "warn")
+            if not page.has_more:
+                break
+            page_number += 1
+        return collected[:MAX_WARNING_ROWS]
 
     async def _run_clearwarnings(self, message: discord.Message, parsed: ParsedCommand) -> None:
         await self._require_view_permissions(message, ACTION_WARN)
@@ -867,7 +895,8 @@ class PrefixDispatcher:
         amount_text = parts[0] if parts else ""
         if not amount_text or not amount_text.isdigit():
             raise InvalidTargetError(
-                "Usage: `·purge <amount>` — provide a number of messages to delete."
+                f"Usage: `{self._prefix_for(message.guild)}purge <amount>` — "
+                "provide a number of messages to delete."
             )
         amount = int(amount_text)
         max_amount = service.max_purge_amount_for(message.guild)
@@ -892,8 +921,10 @@ class PrefixDispatcher:
         service: ModerationService = self.bot.moderation_service
         duration_text = parsed.arguments.strip()
         if not duration_text:
+            prefix = self._prefix_for(message.guild)
             raise InvalidTargetError(
-                "Usage: `·slowmode <seconds>` — e.g. `·slowmode 10` or `·slowmode 0` to clear."
+                f"Usage: `{prefix}slowmode <seconds>` — e.g. `{prefix}slowmode 10` "
+                f"or `{prefix}slowmode 0` to clear."
             )
         cleaned = duration_text.lower()
         if cleaned in ("0", "0s"):
@@ -1012,6 +1043,17 @@ class PrefixDispatcher:
                 message.guild.id,
                 getattr(message.channel, "id", None),
             )
+
+
+def _warning_label(record: CaseRecord, since: datetime | None) -> str:
+    """Active / Cleared / Expired / Failed label for one warning row."""
+    if record.status == STATUS_CLEARED:
+        return "Cleared"
+    if record.status != STATUS_SUCCESS:
+        return "Failed"
+    if since is not None and record.created_at < since:
+        return "Expired"
+    return "Active"
 
 
 def _truncate_reason(reason: str | None) -> str:

@@ -1,27 +1,95 @@
-"""AFK system service.
+"""AFK system: status service and message-driven behaviour.
 
-Manages per-user AFK state across guilds. When a user goes AFK:
-- Their nickname is changed to "AFK | <original name>"
-- The original name is preserved for restoration
-- When they send another message, AFK is automatically removed
-- When someone mentions an AFK user, a notification is sent
+The flow (matching the familiar moderation-bot behaviour):
 
-State persists through bot restarts via the afk_state database table.
+1. **Activation** — ``/afk [reason]`` or ``·afk [reason]`` marks the member
+   away and stores an optional reason.
+2. **Nickname tag** — the member is renamed to ``[AFK] <name>`` so others can
+   see the status before they even message them; the original name is stored so
+   it can be restored exactly.
+3. **Auto-response** — when another member mentions an AFK user, the bot
+   answers in the channel with that user's reason and how long ago they left.
+4. **Automatic removal** — the AFK member's next message in that guild clears
+   the status, restores the original nickname, and posts a short welcome back.
+
+State persists through restarts via the ``afk_state`` table (migration v5).
+
+Failure handling: every Discord call is best-effort. A nickname the bot cannot
+change, a closed DM, a missing channel — all are logged and swallowed, because
+an AFK status must never break message handling.
 """
 
 from __future__ import annotations
 
 import logging
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import discord
 
 from bot.database.migrations import migrate
+from bot.moderation.cases import utc_now
+from bot.utilities.embeds import afk_embed, success_embed
 
 logger = logging.getLogger("riyxoen.afk")
+
+#: Tag applied to an AFK member's nickname (``[AFK] Name``).
+AFK_NICK_PREFIX = "[AFK] "
+#: Discord's maximum nickname length (characters).
+MAX_NICKNAME_LENGTH = 32
+
+
+# ------------------------------------------------------------------- naming
+
+
+def build_afk_nickname(display_name: str) -> str:
+    """The tagged nickname for an AFK member.
+
+    Any previous tag is stripped first (so tags never nest) and the result is
+    truncated to Discord's nickname limit.
+    """
+    base = strip_afk_nickname(display_name or "")
+    return (AFK_NICK_PREFIX + base)[:MAX_NICKNAME_LENGTH]
+
+
+def is_afk_nickname(nickname: str | None) -> bool:
+    """Whether ``nickname`` carries this bot's AFK tag."""
+    return bool(nickname) and str(nickname).startswith(AFK_NICK_PREFIX)
+
+
+def strip_afk_nickname(display_name: str) -> str:
+    """Remove every AFK tag from ``display_name`` (idempotent)."""
+    text = display_name or ""
+    while is_afk_nickname(text):
+        text = text[len(AFK_NICK_PREFIX) :]
+    return text.strip()
+
+
+def format_elapsed(delta: timedelta) -> str:
+    """Render how long ago something happened ("a moment", "5 minutes", ...)."""
+    seconds = max(int(delta.total_seconds()), 0)
+    if seconds < 15:
+        return "a moment"
+    if seconds < 60:
+        return f"{seconds} seconds"
+    minutes = seconds // 60
+    if minutes < 60:
+        return _plural(minutes, "minute")
+    hours = minutes // 60
+    if hours < 24:
+        return _plural(hours, "hour")
+    return _plural(hours // 24, "day")
+
+
+def _plural(value: int, unit: str) -> str:
+    return f"{value} {unit}" if value == 1 else f"{value} {unit}s"
+
+
+# --------------------------------------------------------------------- state
 
 
 @dataclass
@@ -51,9 +119,14 @@ class AfkService:
 
     def _connect(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        self._connection = sqlite3.connect(str(path))
-        self._connection.row_factory = sqlite3.Row
-        migrate(self._connection)
+        connection = sqlite3.connect(str(path))
+        try:
+            connection.row_factory = sqlite3.Row
+            migrate(connection)
+        except Exception:
+            connection.close()
+            raise
+        self._connection = connection
 
     # ------------------------------------------------------------------ get
 
@@ -77,7 +150,7 @@ class AfkService:
             user_id=user_id,
             original_name=row["original_name"],
             afk_message=row["afk_message"],
-            set_at=datetime.fromisoformat(row["set_at"]),
+            set_at=_parse_timestamp(row["set_at"]),
         )
 
     # ------------------------------------------------------------------- set
@@ -89,11 +162,16 @@ class AfkService:
         original_name: str,
         afk_message: str = "",
     ) -> AfkState:
-        """Set a user as AFK. Persists to the database."""
+        """Set (or update) a user's AFK state and persist it.
+
+        ``original_name`` is the member's untagged display name; any AFK tag is
+        stripped so re-running the command never nests tags or stores a tagged
+        name for the later restore.
+        """
         state = AfkState(
             guild_id=guild_id,
             user_id=user_id,
-            original_name=original_name,
+            original_name=strip_afk_nickname(original_name),
             afk_message=afk_message,
             set_at=datetime.now(UTC),
         )
@@ -131,13 +209,13 @@ class AfkService:
             logger.exception("failed to remove AFK state: guild=%s user=%s", guild_id, user_id)
         return state
 
-    # -------------------------------------------------------------- helpers
+    # -------------------------------------------------------------- nicknames
 
     async def apply_nickname(self, member: discord.Member, afk_name: str) -> bool:
-        """Try to change the member's nickname to the AFK format.
+        """Try to set the member's AFK nickname.
 
-        Returns True if the nickname was changed, False if it failed
-        (e.g. role hierarchy prevents the bot from changing it).
+        Returns True if the nickname was changed, False if it failed (e.g. the
+        bot lacks Manage Nicknames or is below the member in the hierarchy).
         """
         try:
             await member.edit(nick=afk_name)
@@ -145,24 +223,29 @@ class AfkService:
         except (discord.Forbidden, discord.HTTPException):
             logger.info(
                 "could not set AFK nickname: guild=%s user=%s",
-                getattr(member, "guild", None) and member.guild.id,
-                member.id,
+                getattr(getattr(member, "guild", None), "id", None),
+                getattr(member, "id", None),
             )
             return False
 
     async def restore_nickname(self, member: discord.Member, original_name: str) -> bool:
-        """Try to restore the member's original nickname.
+        """Restore the member's original nickname (or clear it).
 
-        Returns True if restored, False if it failed.
+        A member who had no nickname before going AFK (their display name was
+        their username) gets the nickname cleared instead of pinned to their
+        username.
         """
+        nickname = None
+        if original_name and original_name != getattr(member, "name", None):
+            nickname = original_name
         try:
-            await member.edit(nick=original_name if original_name else None)
+            await member.edit(nick=nickname)
             return True
         except (discord.Forbidden, discord.HTTPException):
             logger.info(
                 "could not restore nickname: guild=%s user=%s",
-                getattr(member, "guild", None) and member.guild.id,
-                member.id,
+                getattr(getattr(member, "guild", None), "id", None),
+                getattr(member, "id", None),
             )
             return False
 
@@ -171,3 +254,123 @@ class AfkService:
         if self._connection is not None:
             self._connection.close()
             self._connection = None
+
+
+# ------------------------------------------------------------------ events
+
+
+class AfkEventHandler:
+    """Message-driven AFK behaviour: activity detection and mention replies.
+
+    Runs on every guild message *before* prefix commands, so sending a command
+    also counts as activity. The AFK command itself is exempt (via
+    ``status_command``), otherwise re-running ``·afk`` would clear and re-set
+    the status in the same message.
+
+    Never raises: AFK handling must not break message processing.
+    """
+
+    def __init__(
+        self,
+        service: AfkService,
+        *,
+        status_command: Callable[[Any], bool] | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.service = service
+        self._status_command = status_command
+        self._clock = clock or utc_now
+
+    async def handle_message(self, message: Any) -> None:
+        """Process one message (activity + mentions); never raises."""
+        try:
+            await self._handle(message)
+        except Exception:  # noqa: BLE001 - must never break message handling
+            logger.exception(
+                "afk handling failed: guild=%s author=%s",
+                getattr(getattr(message, "guild", None), "id", None),
+                getattr(getattr(message, "author", None), "id", None),
+            )
+
+    async def _handle(self, message: Any) -> None:
+        guild = getattr(message, "guild", None)
+        author = getattr(message, "author", None)
+        if guild is None or author is None or getattr(author, "bot", False):
+            return
+        if not self._is_status_command(message):
+            await self._clear_activity(guild, author, message)
+        await self._answer_mentions(guild, author, message)
+
+    def _is_status_command(self, message: Any) -> bool:
+        """Whether this message is the AFK command itself."""
+        if self._status_command is None:
+            return False
+        try:
+            return bool(self._status_command(message))
+        except Exception:  # noqa: BLE001 - classification is best-effort
+            logger.debug("could not classify the afk command", exc_info=True)
+            return False
+
+    async def _clear_activity(self, guild: Any, author: Any, message: Any) -> None:
+        """The author spoke: drop AFK, restore the nickname, say welcome back."""
+        state = self.service.remove(guild.id, author.id)
+        if state is None:
+            return
+        if is_afk_nickname(getattr(author, "nick", None)):
+            await self.service.restore_nickname(author, state.original_name)
+        await self._send(
+            message,
+            success_embed(
+                "Welcome Back!",
+                f"Welcome back, {author.mention}! Your AFK status has been removed.",
+            ),
+        )
+
+    async def _answer_mentions(self, guild: Any, author: Any, message: Any) -> None:
+        """Answer a mention of AFK members with their reason and elapsed time."""
+        lines: list[str] = []
+        now = self._clock()
+        for user in getattr(message, "mentions", None) or ():
+            if user is None or getattr(user, "bot", False):
+                continue
+            if getattr(user, "id", None) == getattr(author, "id", None):
+                continue
+            state = self.service.get(guild.id, user.id)
+            if state is None:
+                continue
+            name = (
+                getattr(user, "display_name", None) or getattr(user, "name", None) or str(user.id)
+            )
+            line = f"**{name}** is AFK"
+            if state.afk_message:
+                line += f": {state.afk_message}"
+            set_at = state.set_at
+            if set_at.tzinfo is None:
+                set_at = set_at.replace(tzinfo=UTC)
+            line += f" — away for {format_elapsed(now - set_at)}."
+            lines.append(line)
+        if not lines:
+            return
+        await self._send(message, afk_embed("AFK", "\n".join(lines)))
+
+    @staticmethod
+    async def _send(message: Any, embed: discord.Embed) -> None:
+        """Best-effort embed to the message's channel."""
+        channel = getattr(message, "channel", None)
+        if channel is None:
+            return
+        try:
+            await channel.send(embed=embed)
+        except Exception:  # noqa: BLE001 - a notice must never fail the message
+            logger.info(
+                "could not post an AFK notice: guild=%s",
+                getattr(getattr(message, "guild", None), "id", None),
+            )
+
+
+def _parse_timestamp(value: str) -> datetime:
+    """Parse a stored ISO timestamp, defaulting to UTC when it is naive."""
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed

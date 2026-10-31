@@ -120,8 +120,11 @@ def _build_lines(config: GuildConfig, guild: Any) -> list[tuple[str, str]]:
     else:
         spec = "off"
     add("Escalation", f"Warning escalation: {spec}")
-    window = config.warning_window_seconds or "never"
-    add("Escalation", f"Warning expiry: {window}s")
+    if config.warning_window_seconds:
+        window = f"{config.warning_window_seconds}s"
+    else:
+        window = "never expires"
+    add("Escalation", f"Warning expiry: {window}")
     add("Escalation", f"Enforcement cooldown: {config.enforcement_cooldown_seconds}s")
     add("Escalation", f"Default timeout: {config.timeout_duration_seconds}s")
 

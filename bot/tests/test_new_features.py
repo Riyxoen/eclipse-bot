@@ -281,18 +281,21 @@ async def test_afk_sets_nickname() -> None:
     assert state.afk_message == "brb"
 
 
-async def test_afk_removes_on_message() -> None:
-    """AFK is removed when the user sends another message."""
+async def test_afk_command_updates_reason_when_already_afk() -> None:
+    """Re-running ·afk updates the reason instead of toggling the status off.
+
+    Removal is activity-driven (see ``test_afk_events``), not command-driven.
+    """
     world = _world()
     guild = world["guild"]
     user = _regular(guild)
     await _dispatch(world, _message(world, user, "·afk brb"))
     assert world["afk_service"].get(guild.id, user.id) is not None
 
-    await _dispatch(world, _message(world, user, "·afk"))
-    replies = _replies(world)
-    assert any("welcome back" in reply.lower() or "AFK" in reply for reply in replies)
-    assert world["afk_service"].get(guild.id, user.id) is None
+    await _dispatch(world, _message(world, user, "·afk lunch"))
+    state = world["afk_service"].get(guild.id, user.id)
+    assert state is not None
+    assert state.afk_message == "lunch"
 
 
 async def test_afk_mention_notification() -> None:
@@ -339,7 +342,7 @@ async def test_untimeout_removes_timeout() -> None:
     await _dispatch(world, _message(world, moderator, f"·untimeout {target.mention} appeal"))
 
     record = world["case_service"].list_for_guild(guild.id).items[0]
-    assert record.action == "unmute"
+    assert record.action == "untimeout"
     assert record.status == STATUS_SUCCESS
     assert any("untimeout" in reply.lower() or "unmute" in reply.lower() for reply in _replies(world))
 

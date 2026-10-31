@@ -29,6 +29,7 @@ from typing import Literal
 import discord
 from discord import app_commands
 
+from bot.cogs.admin import AdminCommandMixin
 from bot.configuration.errors import GuildConfigError
 from bot.moderation.errors import ModerationError
 from bot.services.guild_config import GuildConfigService
@@ -39,7 +40,7 @@ _INVITE_ACTION_DESCRIPTION = "Invite handling (allow, delete, warn, or timeout).
 _RAID_ACTION_DESCRIPTION = "Raid action (alert posts a log notice; timeout is opt-in)."
 
 
-class AutomodCog(app_commands.Group):
+class AutomodCog(AdminCommandMixin, app_commands.Group):
     """Automated-moderation commands (administrators only)."""
 
     invites = app_commands.Group(name="invites", description="Invite filtering settings.")
@@ -49,44 +50,6 @@ class AutomodCog(app_commands.Group):
         super().__init__(name="automod", description="Automated moderation (administrators).")
         self.bot = bot
         self.config_service = config_service
-
-    # -------------------------------------------------------------- helpers
-
-    def _require_admin(self, interaction: discord.Interaction) -> None:
-        """Gate automod configuration behind the shared admin permission layer."""
-        permissions = interaction.client.permissions
-        permissions.require_guild(interaction.guild)
-        permissions.require_administrator(interaction.user, interaction.guild)
-
-    async def _deny(
-        self, interaction: discord.Interaction, exc: ModerationError | GuildConfigError
-    ) -> None:
-        logger.info("automod command denied: %s (user=%s)", exc.user_message, interaction.user.id)
-        await interaction.response.send_message(exc.user_message, ephemeral=True)
-
-    async def _apply(
-        self, interaction: discord.Interaction, changes: dict, *, summary: str
-    ) -> None:
-        """Validate via the service and respond with old -> new values."""
-        try:
-            self._require_admin(interaction)
-        except ModerationError as exc:
-            await self._deny(interaction, exc)
-            return
-        try:
-            previous = self.config_service.get(interaction.guild.id)
-            self.config_service.update(
-                interaction.guild.id,
-                actor_user_id=interaction.user.id,
-                changes=changes,
-            )
-        except GuildConfigError as exc:
-            await self._deny(interaction, exc)
-            return
-        lines = [f"Updated **{summary}**."]
-        for key, value in changes.items():
-            lines.append(f"- `{key}`: `{getattr(previous, key)}` → `{value}`")
-        await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
     # ------------------------------------------------------- master switch
 

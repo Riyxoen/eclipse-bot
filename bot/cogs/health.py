@@ -13,12 +13,9 @@ import logging
 import discord
 from discord import app_commands
 
+from bot.utilities.text import build_ping_response
+
 logger = logging.getLogger("riyxoen.health")
-
-
-def build_ping_response(latency_ms: float) -> str:
-    """Format the ping response; kept pure for unit testing."""
-    return f"Pong! Gateway latency is {latency_ms:.0f} ms."
 
 
 class HealthCog(app_commands.Group):

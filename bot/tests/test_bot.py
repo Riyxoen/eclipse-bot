@@ -56,6 +56,7 @@ async def test_setup_hook_registers_all_commands_and_builds_services(
 
     names = sorted(command.name for command in bot.tree.get_commands())
     assert names == [
+        "afk",
         "automod",
         "ban",
         "case",

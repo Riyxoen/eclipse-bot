@@ -37,14 +37,17 @@ from bot.configuration.settings import Settings
 from bot.moderation.actions import (
     ACTION_BAN,
     ACTION_DELETE,
+    ACTION_JAIL,
     ACTION_KICK,
     ACTION_LOCK,
     ACTION_PURGE,
     ACTION_SLOWMODE,
     ACTION_TIMEOUT,
     ACTION_UNBAN,
+    ACTION_UNJAIL,
     ACTION_UNLOCK,
     ACTION_UNMUTE,
+    ACTION_UNTIMEOUT,
     ACTION_WARN,
     PUNISHMENT_ACTIONS,
 )
@@ -76,6 +79,7 @@ class ModerationService:
         permissions: PermissionChecker | None = None,
         notifier: NotificationService | None = None,
         config_service: Any = None,
+        jail_service: Any = None,
     ) -> None:
         self.bot = bot
         self.case_service = case_service
@@ -85,6 +89,9 @@ class ModerationService:
         #: Phase 5: when present, per-guild configuration (log channel,
         #: mod-log toggle, DM notifications, max purge) is authoritative.
         self.config_service = config_service
+        #: Jail system (optional). Resolved lazily from the client when not
+        #: injected, so ``ModerationService`` never hard-depends on it.
+        self.jail_service = jail_service
 
     # ------------------------------------------------------------ public API
 
@@ -209,6 +216,90 @@ class ModerationService:
             raise ModerationExecutionError() from None
         return await self._record_success(record, target=user, guild=guild, moderator=moderator)
 
+    # ------------------------------------------------------------------ jail
+
+    async def jail(
+        self,
+        guild: discord.Guild,
+        moderator: discord.Member,
+        target: discord.Member,
+        reason: str,
+    ) -> CaseRecord:
+        """Jail a member: strip their roles and apply the jail role.
+
+        Every permission, target, hierarchy, and state check runs **before**
+        any role is touched: the role work is planned read-only
+        (:meth:`bot.services.jail.JailService.plan_jail`) and only applied
+        once the pipeline accepts the action. A denied jail therefore never
+        leaves a member with their roles stripped — the bug that made
+        ``·jail`` a privilege-escalation path.
+        """
+        jail_service = self._jail_service()
+        jail_service.check_configured(guild)
+        plan = await jail_service.plan_jail(guild, target)
+        return await self._punish(
+            ACTION_JAIL,
+            guild,
+            moderator,
+            target,
+            reason=reason,
+            execute=lambda: jail_service.apply_jail(guild, moderator, target, plan, reason),
+            state_check=lambda: jail_service.assert_not_jailed(guild, target),
+            metadata={"previous_role_ids": list(plan.previous_role_ids)},
+        )
+
+    async def unjail(
+        self,
+        guild: discord.Guild,
+        moderator: discord.Member,
+        target: discord.Member,
+        reason: str,
+    ) -> CaseRecord:
+        """Release a jailed member and restore their previous roles.
+
+        The roles to restore come from the most recent successful ``jail``
+        case for the member. When that record is missing (the jail predates
+        the case metadata, or the member was jailed outside the bot), the
+        member is still released — the jail role is removed and the case
+        records that no roles could be restored.
+        """
+        jail_service = self._jail_service()
+        jail_service.check_configured(guild)
+        metadata_record = jail_service.find_jail_case_metadata(
+            guild.id, target.id, self.case_service
+        )
+        previous_role_ids = list((metadata_record or {}).get("previous_role_ids") or [])
+        metadata: dict = {"previous_role_ids": previous_role_ids}
+
+        async def _execute() -> None:
+            # ``metadata`` is the same dict stored on the record, so the
+            # restored-role count below reaches the persisted case.
+            metadata["restored_role_count"] = await jail_service.apply_unjail(
+                guild, moderator, target, previous_role_ids
+            )
+
+        return await self._punish(
+            ACTION_UNJAIL,
+            guild,
+            moderator,
+            target,
+            reason=reason,
+            execute=_execute,
+            state_check=lambda: jail_service.assert_jailed(guild, target),
+            metadata=metadata,
+        )
+
+    def _jail_service(self) -> Any:
+        """The jail service (injected or attached to the client).
+
+        Raises a safe :class:`ModerationError` when no jail system is
+        available, so callers never see ``AttributeError``.
+        """
+        service = self.jail_service or getattr(self.bot, "jail_service", None)
+        if service is None:
+            raise ModerationError("The jail system is not available.")
+        return service
+
     # ------------------------------------------------------------ mute family
 
     async def mute(
@@ -281,15 +372,17 @@ class ModerationService:
     ) -> CaseRecord:
         """Remove a member's timeout (untimeout prefix command).
 
-        Uses the same pipeline as unmute but creates an untimeout case
-        for clarity. Refuses when the target is not currently timed out.
+        Same pipeline as unmute, but recorded as an ``untimeout`` case so the
+        audit trail names the command the moderator actually used (it used to
+        be stored as ``unmute``). Refuses when the target is not currently
+        timed out.
         """
 
         async def _execute() -> None:
             await target.timeout(None, reason=reason)
 
         return await self._punish(
-            ACTION_UNMUTE,  # uses unmute action for case consistency
+            ACTION_UNTIMEOUT,
             guild,
             moderator,
             target,
@@ -642,6 +735,12 @@ class ModerationService:
         record = replace(record, reason=cleaned)
         try:
             await execute()
+        except ModerationError as exc:
+            # A service-level failure during execution (e.g. role removal
+            # refused mid-jail) is still a real attempt: record it, then let
+            # the caller see the safe message.
+            self._record_failure(record, exc)
+            raise
         except (discord.Forbidden, discord.HTTPException) as exc:
             logger.info(
                 "discord rejected action=%s guild=%s target=%s error=%s",

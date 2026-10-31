@@ -6,6 +6,7 @@ import asyncio
 import logging
 import signal
 import sqlite3
+from typing import Any
 
 import discord
 from discord import app_commands
@@ -19,7 +20,7 @@ from bot.database.config_repository import (
     build_guild_config_repository,
 )
 from bot.database.repository import MemoryCaseRepository, build_case_repository
-from bot.services.afk import AfkService
+from bot.services.afk import AfkEventHandler, AfkService
 from bot.services.jail import JailService
 
 logger = logging.getLogger("riyxoen.bot")
@@ -51,11 +52,13 @@ class RiyxoenBot(discord.Client):
         # before setup_hook completes, but guard anyway).
         self.automod = None
         self.prefix = None
+        self.afk_events = None
         logger.info("intents configured")
 
     async def setup_hook(self) -> None:
         # Local imports avoid cycles between core.bot and the cogs/services.
         from bot.automod.engine import AutomodEngine
+        from bot.cogs.afk import afk_command
         from bot.cogs.automod import AutomodCog
         from bot.cogs.cases import case_command, cases_command, moderation_history_command
         from bot.cogs.config import ConfigCog
@@ -108,6 +111,12 @@ class RiyxoenBot(discord.Client):
         self.jail_service = JailService(self.permissions, self.config_service)
         # Prefix (text) commands. Requires the message-content intent (on by default).
         self.prefix = PrefixDispatcher(self, self.settings)
+        # AFK events: nickname tagging, mention auto-response, and automatic
+        # removal when the member speaks again. Runs before prefix commands so
+        # activity clears AFK even when the message itself is a command.
+        self.afk_events = AfkEventHandler(
+            self.afk_service, status_command=self.prefix.is_afk_command
+        )
         self.automod = AutomodEngine(
             self.settings,
             self.case_service,
@@ -135,6 +144,7 @@ class RiyxoenBot(discord.Client):
             self.tree.add_command(command)
         self.tree.add_command(ping)
         self.tree.add_command(help_command)
+        self.tree.add_command(afk_command)
         self.tree.add_command(case_command)
         self.tree.add_command(cases_command)
         self.tree.add_command(moderation_history_command)
@@ -199,11 +209,15 @@ class RiyxoenBot(discord.Client):
     async def on_message(self, message: discord.Message) -> None:
         """Dispatch guild messages to the prefix commands, then automod.
 
-        Prefix commands (``.el``, ``.ban``, ...) are handled first; the
+        AFK handling runs first: a member's AFK status clears as soon as they
+        speak (even when the message is a command), and mentions of AFK members
+        are answered. Prefix commands (``·el``, ``·ban``, ...) come next; the
         automated moderation engine then analyzes the message (with its own
-        guards: enabled, guild, bot authors, exemptions). Neither path ever
-        raises — the client stays responsive even when a handler misbehaves.
+        guards: enabled, guild, bot authors, exemptions). No path ever raises —
+        the client stays responsive even when a handler misbehaves.
         """
+        if self.afk_events is not None:
+            await self.afk_events.handle_message(message)
         if self.prefix is not None and await self.prefix.handle(message):
             return
         if self.automod is not None:
@@ -219,6 +233,18 @@ class RiyxoenBot(discord.Client):
         """
         if self.automod is not None:
             await self.automod.handle_member_join(getattr(member, "guild", None), member)
+
+
+def _close_services(client: Any) -> None:
+    """Release the client's local resources (SQLite connections) on shutdown."""
+    for attribute in ("afk_service", "case_repository", "config_repository"):
+        service = getattr(client, attribute, None)
+        close = getattr(service, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:  # noqa: BLE001 - shutdown must never raise
+                logger.exception("could not close %s during shutdown", attribute)
 
 
 async def run(settings: Settings) -> int:
@@ -260,5 +286,6 @@ async def run(settings: Settings) -> int:
             if not task.done():
                 task.cancel()
         await asyncio.gather(start_task, stop_task, return_exceptions=True)
+        _close_services(client)
         logger.info("shutdown complete")
     return exit_code

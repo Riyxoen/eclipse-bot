@@ -60,14 +60,6 @@ _SCHEMA_V4 = """
 ALTER TABLE cases ADD COLUMN metadata TEXT;
 """
 
-#: Ordered list of migrations: (schema version, SQL script).
-MIGRATIONS: tuple[tuple[int, str], ...] = (
-    (1, _SCHEMA_V1),
-    (2, _SCHEMA_V2),
-    (3, _SCHEMA_V3),
-    (4, _SCHEMA_V4),
-)
-
 # Phase 11: AFK state persistence. Stores the user's AFK status, original
 # nickname, and optional custom message per guild. Additive; a fresh table
 # does not touch existing data.
@@ -82,6 +74,56 @@ CREATE TABLE IF NOT EXISTS afk_state (
 );
 """
 
+# Phase 12: ``STATUS_CLEARED`` ("cleared") is a valid case status, but v1's
+# CHECK constraint only allowed 'success'/'failed' — so clearing warnings
+# always failed with ``IntegrityError`` on SQLite. SQLite cannot alter a
+# CHECK constraint, so the table is rebuilt in place: rows (including their
+# ``case_id`` values) are copied into a new table with the corrected
+# constraint, the old table is dropped, and the new one takes its name and
+# indexes. The AUTOINCREMENT counter is restored so new case IDs never
+# reuse a copied ID.
+_SCHEMA_V6 = """
+CREATE TABLE cases_rebuilt (
+    case_id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id           INTEGER NOT NULL,
+    target_user_id     INTEGER NOT NULL,
+    moderator_user_id  INTEGER NOT NULL,
+    action             TEXT    NOT NULL,
+    reason             TEXT    NOT NULL,
+    duration_seconds   INTEGER,
+    expires_at         TEXT,
+    status             TEXT    NOT NULL CHECK (status IN ('success', 'failed', 'cleared')),
+    error              TEXT,
+    created_at         TEXT    NOT NULL,
+    automated          INTEGER NOT NULL DEFAULT 0,
+    detector           TEXT,
+    metadata           TEXT
+);
+
+INSERT INTO cases_rebuilt (
+    case_id, guild_id, target_user_id, moderator_user_id, action, reason,
+    duration_seconds, expires_at, status, error, created_at, automated,
+    detector, metadata
+)
+SELECT
+    case_id, guild_id, target_user_id, moderator_user_id, action, reason,
+    duration_seconds, expires_at, status, error, created_at, automated,
+    detector, metadata
+FROM cases;
+
+DROP TABLE cases;
+
+ALTER TABLE cases_rebuilt RENAME TO cases;
+
+CREATE INDEX IF NOT EXISTS idx_cases_guild ON cases (guild_id);
+CREATE INDEX IF NOT EXISTS idx_cases_guild_target ON cases (guild_id, target_user_id);
+
+DELETE FROM sqlite_sequence WHERE name IN ('cases', 'cases_rebuilt');
+INSERT INTO sqlite_sequence (name, seq)
+    SELECT 'cases', COALESCE(MAX(case_id), 0) FROM cases;
+"""
+
+
 #: Ordered list of migrations: (schema version, SQL script).
 MIGRATIONS: tuple[tuple[int, str], ...] = (
     (1, _SCHEMA_V1),
@@ -89,6 +131,7 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
     (3, _SCHEMA_V3),
     (4, _SCHEMA_V4),
     (5, _SCHEMA_V5),
+    (6, _SCHEMA_V6),
 )
 
 #: The newest schema version the code understands.

@@ -32,6 +32,7 @@ from bot.configuration.automod import (
 )
 from bot.configuration.errors import GuildConfigError
 from bot.configuration.loader import MAX_PURGE_AMOUNT_CEILING
+from bot.configuration.prefix import MAX_PREFIX_LENGTH, validate_command_prefix
 from bot.configuration.settings import Settings
 from bot.moderation.validation import MAX_TIMEOUT_SECONDS
 
@@ -280,19 +281,18 @@ def _require_id_tuple(name: str, value: Any, *, allow_empty: bool = True) -> tup
 
 
 def _require_prefix(name: str, value: Any) -> str:
-    """Validate a text-command prefix: 1-3 non-space characters without
-    characters that conflict with Discord syntax (mentions, channels, slash
-    commands). Returns the cleaned prefix."""
-    if not isinstance(value, str) or not value.strip():
-        raise GuildConfigError(f"{name} must be 1-3 non-space characters.")
-    cleaned = value.strip()
-    if len(cleaned) > 3:
-        raise GuildConfigError(f"{name} can't be longer than 3 characters.")
-    if any(ch.isspace() for ch in cleaned):
-        raise GuildConfigError(f"{name} can't contain spaces.")
-    if any(ch in cleaned for ch in ("@", "#", "/", "<", ">", ":")):
-        raise GuildConfigError(f"{name} can't contain @, #, /, <, >, or : characters.")
-    return cleaned
+    """Validate a text-command prefix using the shared rule.
+
+    The same rule (length + forbidden characters) is used for
+    ``RIYXOEN_COMMAND_PREFIX`` in :mod:`bot.configuration.loader`, so the
+    environment and ``/config prefix`` can never disagree.
+    """
+    if not isinstance(value, str):
+        raise GuildConfigError(f"{name} must be 1-{MAX_PREFIX_LENGTH} non-space characters.")
+    try:
+        return validate_command_prefix(value)
+    except ValueError as exc:
+        raise GuildConfigError(f"{name} {exc}.") from exc
 
 
 def _require_str_list(name: str, value: Any, *, allow_empty: bool = True) -> tuple[str, ...]:

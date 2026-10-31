@@ -1,24 +1,42 @@
 """Jail system service.
 
-Manages the per-guild jail: applying a jail role, stripping previous
-roles, and restoring them on release. The jail configuration (role ID,
-channel ID) lives in GuildConfig; previous roles are stored in the
-case metadata for auditability.
+Manages the per-guild jail: applying a jail role, stripping previous roles,
+and restoring them on release. The jail configuration (role ID, channel ID)
+lives in GuildConfig; previous roles are stored in the case metadata for
+auditability.
 
-Pipeline:
-    guild config -> permission checks -> role manipulation -> case record
+Pipeline (owned by :class:`bot.services.moderation.ModerationService`)::
+
+    permission checks -> plan (read-only) -> Discord mutation -> case record
+
+This module deliberately exposes the jail work as two steps:
+
+- :meth:`JailService.plan_jail` / :meth:`JailService.plan_unjail` are
+  **read-only**: they resolve the jail role and compute which roles would be
+  removed/restored. Nothing is mutated, so the moderation service can call
+  them before (or instead of) enforcing.
+- :meth:`JailService.apply_jail` / :meth:`JailService.apply_unjail` perform
+  the Discord mutations and are only called once every permission, target,
+  hierarchy, and state check has passed.
+
+There is intentionally **no** public ``jail()``/``unjail()`` entry point on
+this service: callers must go through
+:meth:`bot.services.moderation.ModerationService.jail` so the checks can
+never be skipped and every attempt produces a case record.
 
 Safety:
-- Previous roles are always stored before removal.
+
+- Previous roles are stored on the case before removal, so ``·unjail`` can
+  restore them.
 - Deleted roles are skipped on restore (never crash).
-- Roles higher than the bot's highest role are never removed.
-- The bot's own role is never removed.
-- Jail/unjail produce moderation cases for full audit trail.
+- Roles at or above the bot's highest role are never removed.
+- The bot's own top role and ``@everyone`` are never removed.
 """
 
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 import discord
@@ -37,8 +55,32 @@ from bot.services.guild_config import GuildConfigService
 logger = logging.getLogger("riyxoen.jail")
 
 
+@dataclass(frozen=True, slots=True)
+class JailPlan:
+    """A read-only plan for jailing one member (no Discord mutation).
+
+    ``roles_to_remove`` are the member's roles that the bot may strip (below
+    the bot's highest role, excluding ``@everyone``); ``previous_role_ids`` is
+    what gets stored on the case so ``·unjail`` can restore them.
+    """
+
+    jail_role: discord.Role
+    roles_to_remove: tuple[Any, ...]
+
+    @property
+    def previous_role_ids(self) -> tuple[int, ...]:
+        """IDs of the roles that will be removed (stored on the case)."""
+        return tuple(role.id for role in self.roles_to_remove)
+
+
+def _actor_name(actor: Any) -> str:
+    """Safe display name for a moderator (never raises)."""
+    name = getattr(actor, "display_name", None) or getattr(actor, "name", None)
+    return str(name) if name else str(getattr(actor, "id", "moderator"))
+
+
 class JailService:
-    """Manages the jail system: setup, jail, and unjail operations."""
+    """Manages the jail system: setup, plan/apply, and release."""
 
     def __init__(
         self,
@@ -108,14 +150,18 @@ class JailService:
                     try:
                         await jail_role.edit(position=bot_member.top_role.position - 1)
                     except (discord.Forbidden, discord.HTTPException):
-                        pass
+                        logger.info(
+                            "could not reposition the jail role: guild=%s role=%s",
+                            guild.id,
+                            jail_role.id,
+                        )
             except discord.Forbidden:
                 raise MissingBotPermissionError(
                     "I need the Manage Roles permission to create the jail role."
                 ) from None
             except discord.HTTPException:
                 raise ModerationError(
-                    "The jail role could be created by Discord. Please try again."
+                    "The jail role could not be created by Discord. Please try again."
                 ) from None
         changes["jail_role_id"] = jail_role.id
 
@@ -159,178 +205,191 @@ class JailService:
             changes=changes,
         )
 
-    # ----------------------------------------------------------------- jail
+    # ------------------------------------------------------------ validation
 
-    async def jail(
+    def check_configured(self, guild: discord.Guild) -> discord.Role:
+        """Return the guild's jail role, raising a safe error when unusable.
+
+        Raises :class:`JailNotConfiguredError` when the jail system was never
+        set up or when the configured role has been deleted since.
+        """
+        config = self._config(guild.id)
+        if config.jail_role_id is None:
+            raise JailNotConfiguredError()
+        role = self.get_jail_role(guild)
+        if role is None:
+            raise JailNotConfiguredError(
+                "The jail role has been deleted. An administrator must run `·jail setup` again."
+            )
+        return role
+
+    def assert_not_jailed(self, guild: discord.Guild, target: discord.Member) -> None:
+        """Raise :class:`AlreadyJailedError` when ``target`` is already jailed."""
+        jail_role = self.check_configured(guild)
+        if jail_role in target.roles:
+            raise AlreadyJailedError()
+
+    def assert_jailed(self, guild: discord.Guild, target: discord.Member) -> None:
+        """Raise :class:`NotJailedError` when ``target`` is not jailed."""
+        jail_role = self.check_configured(guild)
+        if jail_role not in target.roles:
+            raise NotJailedError()
+
+    # ------------------------------------------------------------------ jail
+
+    async def plan_jail(self, guild: discord.Guild, target: discord.Member) -> JailPlan:
+        """Compute what jailing ``target`` would change (read-only).
+
+        Never mutates Discord state, so it is safe to call before the
+        permission checks: nothing happens if they then reject the action.
+        """
+        jail_role = self.check_configured(guild)
+        bot_member = await self.permissions._get_bot_member(guild)
+        bot_top_role = getattr(bot_member, "top_role", None)
+        bot_highest_pos = getattr(bot_top_role, "position", 0)
+
+        roles_to_remove = tuple(
+            role
+            for role in target.roles
+            # Never remove @everyone.
+            if role.id != guild.default_role.id
+            # Never remove roles at or above the bot's highest role.
+            and getattr(role, "position", 0) < bot_highest_pos
+            # Never remove the bot's own role.
+            and role != bot_top_role
+        )
+        return JailPlan(jail_role=jail_role, roles_to_remove=roles_to_remove)
+
+    async def apply_jail(
         self,
         guild: discord.Guild,
         moderator: discord.Member,
         target: discord.Member,
+        plan: JailPlan,
         reason: str,
-    ) -> list[discord.Role]:
-        """Jail a member: save their roles, strip them, apply jail role.
+    ) -> None:
+        """Strip the planned roles and apply the jail role.
 
-        Returns the list of previous role IDs that were removed (stored
-        in the returned metadata for case records).
-
-        Raises:
-            JailNotConfiguredError: if the jail system isn't set up
-            AlreadyJailedError: if the user is already jailed
+        Only called after every permission, target, hierarchy, and state
+        check has passed (see :meth:`bot.services.moderation.ModerationService.jail`).
         """
-        self.permissions.require_guild(guild)
+        audit = f"Jailed by {_actor_name(moderator)}: {reason}"
 
-        config = self._config(guild.id)
-        if config.jail_role_id is None:
-            raise JailNotConfiguredError()
-
-        jail_role = self.get_jail_role(guild)
-        if jail_role is None:
-            raise JailNotConfiguredError(
-                "The jail role has been deleted. An administrator must run `·jail setup` again."
-            )
-
-        # Check if already jailed
-        if jail_role in target.roles:
-            raise AlreadyJailedError()
-
-        # Save previous roles (exclude @everyone and roles higher than bot's)
-        bot_member = await self.permissions._get_bot_member(guild)
-        bot_highest_pos = getattr(getattr(bot_member, "top_role", None), "position", 0)
-
-        previous_role_ids = []
-        roles_to_remove = []
-        for role in target.roles:
-            # Never remove @everyone
-            if role.id == guild.default_role.id:
-                continue
-            # Never remove roles at or above the bot's highest role
-            if role.position >= bot_highest_pos:
-                continue
-            # Never remove the bot's own role
-            if role == getattr(bot_member, "top_role", None):
-                continue
-            previous_role_ids.append(role.id)
-            roles_to_remove.append(role)
-
-        # Remove old roles
-        if roles_to_remove:
+        if plan.roles_to_remove:
             try:
-                await target.remove_roles(
-                    *roles_to_remove,
-                    reason=f"Jailed by {moderator.display_name}: {reason}",
-                )
+                await target.remove_roles(*plan.roles_to_remove, reason=audit)
             except (discord.Forbidden, discord.HTTPException) as exc:
-                raise ModerationError(
-                    "Failed to remove roles from the jailed user."
-                ) from exc
+                raise ModerationError("Failed to remove roles from the jailed user.") from exc
 
-        # Add jail role
         try:
-            await target.add_roles(
-                jail_role,
-                reason=f"Jailed by {moderator.display_name}: {reason}",
-            )
+            await target.add_roles(plan.jail_role, reason=audit)
         except (discord.Forbidden, discord.HTTPException) as exc:
             # Try to restore roles if adding jail role fails
-            if roles_to_remove:
+            if plan.roles_to_remove:
                 try:
-                    await target.add_roles(*roles_to_remove, reason="Jail failed, restoring roles")
-                except (discord.Forbidden, discord.HTTPException):
-                    pass
-            raise ModerationError(
-                "Failed to apply the jail role."
-            ) from exc
-
-        # Move to jail channel if configured
-        if config.jail_channel_id is not None:
-            jail_channel = self.get_jail_channel(guild)
-            if jail_channel is not None:
-                try:
-                    # Allow the jailed user to see the jail channel
-                    await jail_channel.set_permissions(
-                        target,
-                        read_messages=True,
-                        send_messages=True,
-                        reason=f"Jailed: {reason}",
+                    await target.add_roles(
+                        *plan.roles_to_remove, reason="Jail failed, restoring roles"
                     )
                 except (discord.Forbidden, discord.HTTPException):
                     logger.info(
-                        "could not set jail channel permissions: guild=%s user=%s",
+                        "could not restore roles after a failed jail: guild=%s user=%s",
                         guild.id,
-                        target.id,
+                        getattr(target, "id", None),
                     )
+            raise ModerationError("Failed to apply the jail role.") from exc
 
-        return previous_role_ids
+        await self._open_jail_channel(guild, target, reason)
+
+    async def _open_jail_channel(
+        self, guild: discord.Guild, target: discord.Member, reason: str
+    ) -> None:
+        """Best-effort: let the jailed member see the jail channel."""
+        config = self._config(guild.id)
+        if config.jail_channel_id is None:
+            return
+        jail_channel = self.get_jail_channel(guild)
+        if jail_channel is None:
+            return
+        try:
+            await jail_channel.set_permissions(
+                target,
+                read_messages=True,
+                send_messages=True,
+                reason=f"Jailed: {reason}",
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            logger.info(
+                "could not set jail channel permissions: guild=%s user=%s",
+                guild.id,
+                getattr(target, "id", None),
+            )
 
     # ---------------------------------------------------------------- unjail
 
-    async def unjail(
+    async def plan_unjail(
+        self,
+        guild: discord.Guild,
+        target: discord.Member,
+        previous_role_ids: list[int],
+    ) -> tuple[Any, ...]:
+        """Compute which previous roles can be restored (read-only).
+
+        Roles that no longer exist, are at or above the bot's highest role, or
+        are the jail role itself are skipped — never an error.
+        """
+        self.check_configured(guild)
+        bot_member = await self.permissions._get_bot_member(guild)
+        bot_highest_pos = getattr(getattr(bot_member, "top_role", None), "position", 0)
+        jail_role_id = self._config(guild.id).jail_role_id
+
+        restorable: list[Any] = []
+        for role_id in previous_role_ids:
+            if role_id == jail_role_id:
+                continue
+            role = guild.get_role(role_id)
+            if role is None:
+                # Role was deleted — skip silently.
+                continue
+            if getattr(role, "position", 0) >= bot_highest_pos:
+                # Role is at or above the bot's highest — skip.
+                continue
+            restorable.append(role)
+        return tuple(restorable)
+
+    async def apply_unjail(
         self,
         guild: discord.Guild,
         moderator: discord.Member,
         target: discord.Member,
         previous_role_ids: list[int],
-    ) -> None:
-        """Release a member from jail: remove jail role, restore previous roles.
+    ) -> int:
+        """Remove the jail role and restore the member's previous roles.
 
-        Roles that no longer exist or are above the bot are safely skipped.
+        Returns the number of roles actually restored. Every step is
+        best-effort for the restore (logged, never raised): the member must
+        always be released from jail.
         """
-        self.permissions.require_guild(guild)
+        jail_role = self.check_configured(guild)
+        audit = f"Unjailed by {_actor_name(moderator)}"
 
-        config = self._config(guild.id)
-        if config.jail_role_id is None:
-            raise JailNotConfiguredError()
-
-        jail_role = self.get_jail_role(guild)
-        if jail_role is None:
-            raise JailNotConfiguredError(
-                "The jail role has been deleted."
-            )
-
-        # Check if actually jailed
-        if jail_role not in target.roles:
-            raise NotJailedError()
-
-        # Remove jail role
         try:
-            await target.remove_roles(
-                jail_role,
-                reason=f"Unjailed by {moderator.display_name}",
-            )
+            await target.remove_roles(jail_role, reason=audit)
         except (discord.Forbidden, discord.HTTPException) as exc:
-            raise ModerationError(
-                "Failed to remove the jail role."
-            ) from exc
+            raise ModerationError("Failed to remove the jail role.") from exc
 
-        # Restore previous roles (skip deleted/higher roles)
-        bot_member = await self.permissions._get_bot_member(guild)
-        bot_highest_pos = getattr(getattr(bot_member, "top_role", None), "position", 0)
-
-        roles_to_restore = []
-        for role_id in previous_role_ids:
-            role = guild.get_role(role_id)
-            if role is None:
-                # Role was deleted — skip silently
-                continue
-            if role.position >= bot_highest_pos:
-                # Role is at or above bot's highest — skip
-                continue
-            roles_to_restore.append(role)
-
+        roles_to_restore = await self.plan_unjail(guild, target, previous_role_ids)
         if roles_to_restore:
             try:
-                await target.add_roles(
-                    *roles_to_restore,
-                    reason=f"Unjailed by {moderator.display_name}",
-                )
+                await target.add_roles(*roles_to_restore, reason=audit)
             except (discord.Forbidden, discord.HTTPException):
+                roles_to_restore = ()
                 logger.info(
-                    "could not restore all roles during unjail: guild=%s user=%s",
+                    "could not restore roles during unjail: guild=%s user=%s",
                     guild.id,
-                    target.id,
+                    getattr(target, "id", None),
                 )
 
-        # Remove jail channel permissions
+        config = self._config(guild.id)
         if config.jail_channel_id is not None:
             jail_channel = self.get_jail_channel(guild)
             if jail_channel is not None:
@@ -342,6 +401,7 @@ class JailService:
                     )
                 except (discord.Forbidden, discord.HTTPException):
                     pass
+        return len(roles_to_restore)
 
     # ----------------------------------------------------------- helpers
 

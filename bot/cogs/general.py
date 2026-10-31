@@ -12,12 +12,15 @@ import logging
 import discord
 from discord import app_commands
 
+from bot.utilities.text import build_ping_response
+
 logger = logging.getLogger("riyxoen.general")
 
 HELP_TEXT = (
     "**Eclipse commands**\n"
     "- `/ping` — Check the bot's latency\n"
     "- `/help` — Show this help\n"
+    "- `/afk [reason]` — Mark yourself AFK (cleared when you next speak)\n"
     "- `/health ping` — Health check\n"
     "- `/warn <member> [reason]` — Warn a member\n"
     "- `/timeout <member> <duration> [reason]` — Time out a member "
@@ -32,11 +35,6 @@ HELP_TEXT = (
     "- `/case <case_id>` · `/cases <member>` · `/moderation-history <member>` — Case history\n"
     "- `/config …` — Server configuration (administrators)"
 )
-
-
-def build_ping_response(latency_ms: float) -> str:
-    """Format the ping response; kept pure for unit testing."""
-    return f"Pong! Gateway latency is {latency_ms:.0f} ms."
 
 
 @app_commands.command(name="ping", description="Check the bot's gateway latency.")
